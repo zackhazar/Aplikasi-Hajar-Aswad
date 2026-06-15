@@ -39,6 +39,7 @@ import {
   Mail,
   Lock,
   Download,
+  RotateCcw,
   Scale,
   Coins,
   CalendarDays,
@@ -233,6 +234,71 @@ const reportEffect = (t, txById = {}) => {
   return { kind: null, revDelta: 0, expDelta: 0, origin: null };
 };
 
+const textLower = (...parts) => parts.filter(Boolean).join(" ").toLowerCase();
+const txText = (t, cat) =>
+  textLower(cat?.name, t?.description, t?.reference, t?.method);
+const isEquityCat = (cat) =>
+  !!cat?.equity ||
+  /setoran modal|modal disetor|tambahan modal/.test(cat?.name || "");
+const isCarryoverExpense = (t, cat) =>
+  !!cat?.carryover ||
+  (t?.type === "expense" &&
+    /pelunasan kewajiban|kewajiban 2025|hutang 2025|utang 2025|pajak 2025/.test(
+      txText(t, cat)
+    ));
+const isFinancialIncome = (t, cat, origin) => {
+  const source = origin || t;
+  const txt = txText(source, cat);
+  return (
+    !!cat?.financialIncome ||
+    (source?.type === "income" &&
+      /bagi hasil|bunga bank|deposito|jasa giro|bonus bank|imbal hasil/.test(
+        txt
+      ))
+  );
+};
+const isBankTaxOrFinanceCost = (t, cat, origin) => {
+  const source = origin || t;
+  const txt = txText(source, cat);
+  return (
+    !!cat?.finalTax ||
+    !!cat?.financeCost ||
+    /pajak dari bank|pajak final|pph final|pajak bunga|pajak deposito|biaya bank|admin bank|biaya admin|fee/.test(
+      txt
+    )
+  );
+};
+const isDirectCost = (t, cat, origin) => {
+  const source = origin || t;
+  const txt = txText(source, cat);
+  return (
+    !!cat?.directCost ||
+    /hotel|akomodasi|tiket|pesawat|visa|paspor|transport|bus|mutowif|muthowif|vaksin|meningitis|polio|raudhah|siskopatuh|manasik|perlengkapan|kereta cepat|handling|ground|paket|supplier|vendor/.test(
+      txt
+    )
+  );
+};
+const isOperatingExpense = (t, cat, origin) => {
+  const source = origin || t;
+  const txt = txText(source, cat);
+  return (
+    !!cat?.operatingExpense ||
+    /gaji|upah|salary|payroll|karyawan|staff|pegawai|honor|honorarium|thr|bonus karyawan|marketing|iklan|brosur|sewa kantor|operasional|atk|listrik|internet|pulsa|makan|parkir|bbm|admin kantor/.test(
+      txt
+    )
+  );
+};
+const isPayrollExpense = (t, cat, origin) => {
+  const source = origin || t;
+  return /gaji|upah|salary|payroll|honor|honorarium|thr|bonus karyawan|tunjangan/i.test(
+    txText(source, cat)
+  );
+};
+const addAmount = (map, key, amount) => {
+  const name = key || "Lainnya";
+  map[name] = (map[name] || 0) + amount;
+};
+
 /* ---------- ownership meta ---------- */
 const OWN = {
   COMPANY: {
@@ -297,7 +363,14 @@ const SERVICES = [
   {
     id: "vaksin",
     label: "Vaksin Meningitis",
-    short: "Vaksin",
+    short: "V.Meningitis",
+    icon: Syringe,
+    lead: 21,
+  },
+  {
+    id: "vaksin_polio",
+    label: "Vaksin Polio",
+    short: "V.Polio",
     icon: Syringe,
     lead: 21,
   },
@@ -321,6 +394,13 @@ const SERVICES = [
     label: "Perlengkapan",
     short: "Perlengkapan",
     icon: Package,
+    lead: 14,
+  },
+  {
+    id: "kereta_cepat",
+    label: "Kereta Cepat",
+    short: "Kereta Cepat",
+    icon: Bus,
     lead: 14,
   },
 ];
@@ -361,8 +441,16 @@ const emptyServices = () =>
       { status: "Belum", due: null, pic: "", note: "", link: "" },
     ])
   );
-const neededIds = (g) =>
-  Array.isArray(g.needed) ? g.needed : SERVICES.map((s) => s.id);
+const serviceIds = () => SERVICES.map((s) => s.id);
+const normalizeNeededServices = (needed) => {
+  const valid = new Set(serviceIds());
+  if (!Array.isArray(needed)) return serviceIds();
+  const ids = needed.filter((id) => valid.has(id));
+  if (ids.includes("vaksin") && !ids.includes("vaksin_polio"))
+    ids.push("vaksin_polio");
+  return Array.from(new Set(ids));
+};
+const neededIds = (g) => normalizeNeededServices(g?.needed);
 const groupProgress = (g) => {
   const ids = neededIds(g);
   const items = ids
@@ -388,6 +476,48 @@ const serviceAlert = (g, sid) => {
 };
 const groupAlerts = (g) =>
   neededIds(g).filter((id) => serviceAlert(g, id)).length;
+const groupFinance = (g, data) => {
+  const tx = (data?.tx || []).filter((t) => t.groupId === g.id);
+  const income = tx
+    .filter((t) => t.type === "income")
+    .reduce((s, t) => s + (Number(t.amount) || 0), 0);
+  const expense = tx
+    .filter((t) => t.type === "expense")
+    .reduce((s, t) => s + (Number(t.amount) || 0), 0);
+  return {
+    income,
+    expense,
+    profit: income - expense,
+    count: tx.length,
+  };
+};
+const pickFirst = (items, test) => (items || []).find(test)?.id || "";
+const defaultGroupAccount = (data) =>
+  pickFirst(data?.accounts, (a) => a.ownership === "COMPANY") ||
+  data?.accounts?.[0]?.id ||
+  "";
+const defaultIncomeCategory = (data) =>
+  pickFirst(
+    data?.categories,
+    (c) =>
+      c.kind === "income" &&
+      /pelunasan|penjualan|paket|pendapatan/i.test(c.name || "")
+  ) || pickFirst(data?.categories, (c) => c.kind === "income");
+const defaultExpenseCategory = (data) =>
+  pickFirst(
+    data?.categories,
+    (c) =>
+      c.kind === "expense" &&
+      !/biaya bank|admin|fee/i.test(c.name || "") &&
+      /hotel|akomodasi|visa|tiket|operasional|pembelian|handling/i.test(
+        c.name || ""
+      )
+  ) || pickFirst(data?.categories, (c) => c.kind === "expense");
+const defaultAdminCategory = (data) =>
+  pickFirst(
+    data?.categories,
+    (c) => c.kind === "expense" && /biaya bank|admin|fee/i.test(c.name || "")
+  ) || defaultExpenseCategory(data);
 
 function normalize(d) {
   if (!d) return d;
@@ -400,7 +530,7 @@ function normalize(d) {
   d.payables = d.payables || [];
   d.groups = (d.groups || []).map((g) => ({
     ...g,
-    needed: Array.isArray(g.needed) ? g.needed : SERVICES.map((s) => s.id),
+    needed: normalizeNeededServices(g.needed),
     services: { ...emptyServices(), ...(g.services || {}) },
   }));
   d.jamaah = d.jamaah || [];
@@ -409,6 +539,7 @@ function normalize(d) {
   d.openingBalance = d.openingBalance || null;
   d.tx = (d.tx || []).map((t) => ({
     ...t,
+    groupId: t.groupId || null,
     refundOfTxId: t.refundOfTxId || null,
   }));
   (d.categories || []).forEach((c) => {
@@ -418,6 +549,74 @@ function normalize(d) {
       (c.id === "ci-mod" || /setoran modal|modal disetor/i.test(c.name || ""))
     )
       c.equity = true;
+    if (
+      c.kind === "income" &&
+      !("financialIncome" in c) &&
+      /bagi hasil|bunga bank|deposito|jasa giro|bonus bank|imbal hasil/i.test(
+        c.name || ""
+      )
+    )
+      c.financialIncome = true;
+    if (
+      c.kind === "income" &&
+      !c.equity &&
+      !c.financialIncome &&
+      !("operatingRevenue" in c)
+    )
+      c.operatingRevenue = true;
+    if (
+      c.kind === "expense" &&
+      !("finalTax" in c) &&
+      /pajak dari bank|pajak final|pph final|pajak bunga|pajak deposito/i.test(
+        c.name || ""
+      )
+    )
+      c.finalTax = true;
+    if (
+      c.kind === "expense" &&
+      !("financeCost" in c) &&
+      /biaya bank|admin bank|biaya admin|fee|pajak dari bank|pajak final|pph final|pajak bunga|pajak deposito/i.test(
+        c.name || ""
+      )
+    )
+      c.financeCost = true;
+    if (
+      c.kind === "expense" &&
+      !c.finalTax &&
+      !c.financeCost &&
+      /gaji|upah|salary|payroll|karyawan|staff|pegawai|honor|honorarium|thr|bonus karyawan|tunjangan/i.test(
+        c.name || ""
+      )
+    ) {
+      c.directCost = false;
+      c.operatingExpense = true;
+    }
+    if (
+      c.kind === "expense" &&
+      !c.finalTax &&
+      !c.financeCost &&
+      !("directCost" in c) &&
+      /hotel|akomodasi|tiket|pesawat|visa|paspor|transport|bus|mutowif|muthowif|vaksin|meningitis|polio|raudhah|siskopatuh|manasik|perlengkapan|kereta cepat|handling|ground|paket|supplier|vendor/i.test(
+        c.name || ""
+      )
+    )
+      c.directCost = true;
+    if (
+      c.kind === "expense" &&
+      !c.finalTax &&
+      !c.financeCost &&
+      !c.directCost &&
+      !("operatingExpense" in c)
+    )
+      c.operatingExpense = true;
+    if (
+      c.kind === "expense" &&
+      !("carryover" in c) &&
+      /pelunasan kewajiban|kewajiban 2025|hutang 2025|utang 2025|pajak 2025/i.test(
+        c.name || ""
+      )
+    )
+      c.carryover = true;
   });
   return d;
 }
@@ -479,19 +678,97 @@ function seed() {
     },
   ];
   const categories = [
-    { id: "ci-dp", name: "DP Paket", kind: "income" },
-    { id: "ci-pel", name: "Pelunasan Paket", kind: "income" },
-    { id: "ci-tkt", name: "Penjualan Tiket", kind: "income" },
-    { id: "ci-kom", name: "Komisi", kind: "income" },
+    { id: "ci-dp", name: "DP Paket", kind: "income", operatingRevenue: true },
+    {
+      id: "ci-pel",
+      name: "Pelunasan Paket",
+      kind: "income",
+      operatingRevenue: true,
+    },
+    {
+      id: "ci-tkt",
+      name: "Penjualan Tiket",
+      kind: "income",
+      operatingRevenue: true,
+    },
+    { id: "ci-kom", name: "Komisi", kind: "income", operatingRevenue: true },
+    {
+      id: "ci-bank",
+      name: "Pendapatan Keuangan",
+      kind: "income",
+      financialIncome: true,
+    },
     { id: "ci-mod", name: "Setoran Modal", kind: "income", equity: true },
-    { id: "ce-htl", name: "Hotel & Akomodasi", kind: "expense" },
-    { id: "ce-psw", name: "Tiket Pesawat", kind: "expense" },
-    { id: "ce-trs", name: "Transport & Bus", kind: "expense" },
-    { id: "ce-gaj", name: "Gaji Karyawan", kind: "expense" },
-    { id: "ce-mkt", name: "Marketing", kind: "expense" },
-    { id: "ce-swk", name: "Sewa Kantor", kind: "expense" },
-    { id: "ce-ops", name: "Operasional", kind: "expense" },
-    { id: "ce-bank", name: "Biaya Bank", kind: "expense" },
+    {
+      id: "ce-htl",
+      name: "Hotel & Akomodasi",
+      kind: "expense",
+      directCost: true,
+    },
+    { id: "ce-psw", name: "Tiket Pesawat", kind: "expense", directCost: true },
+    {
+      id: "ce-trs",
+      name: "Transport & Bus",
+      kind: "expense",
+      directCost: true,
+    },
+    {
+      id: "ce-visa",
+      name: "Visa & Dokumen",
+      kind: "expense",
+      directCost: true,
+    },
+    {
+      id: "ce-vaksin",
+      name: "Vaksin Jamaah",
+      kind: "expense",
+      directCost: true,
+    },
+    {
+      id: "ce-manasik",
+      name: "Manasik & Perlengkapan",
+      kind: "expense",
+      directCost: true,
+    },
+    {
+      id: "ce-kereta",
+      name: "Kereta Cepat",
+      kind: "expense",
+      directCost: true,
+    },
+    { id: "ce-mutowif", name: "Mutowif", kind: "expense", directCost: true },
+    {
+      id: "ce-gaj",
+      name: "Gaji Karyawan",
+      kind: "expense",
+      operatingExpense: true,
+    },
+    {
+      id: "ce-mkt",
+      name: "Marketing",
+      kind: "expense",
+      operatingExpense: true,
+    },
+    {
+      id: "ce-swk",
+      name: "Sewa Kantor",
+      kind: "expense",
+      operatingExpense: true,
+    },
+    {
+      id: "ce-ops",
+      name: "Operasional",
+      kind: "expense",
+      operatingExpense: true,
+    },
+    { id: "ce-bank", name: "Biaya Bank", kind: "expense", financeCost: true },
+    {
+      id: "ce-taxbank",
+      name: "PPh Final Bank",
+      kind: "expense",
+      finalTax: true,
+      financeCost: true,
+    },
   ];
   const contacts = [
     {
@@ -1469,6 +1746,8 @@ function FinanceApp({ session }) {
   const [view, setView] = useState(isOwner ? "dashboard" : "keberangkatan");
   const [ownFilter, setOwnFilter] = useState("ALL");
   const [sync, setSync] = useState("saved");
+  const [undoStack, setUndoStack] = useState([]);
+  const [undoOpen, setUndoOpen] = useState(false);
   const cloudReadyRef = useRef(false);
   const skipSave = useRef(true);
   const savingRef = useRef(false);
@@ -1476,6 +1755,7 @@ function FinanceApp({ session }) {
 
   // modals
   const [txModal, setTxModal] = useState(null);
+  const [dealModal, setDealModal] = useState(null);
   const [importModal, setImportModal] = useState(null);
   const [accModal, setAccModal] = useState(null);
   const [contactModal, setContactModal] = useState(null);
@@ -1486,6 +1766,7 @@ function FinanceApp({ session }) {
   const [catModal, setCatModal] = useState(null);
   const [groupModal, setGroupModal] = useState(null);
   const [jamaahModal, setJamaahModal] = useState(null);
+  const [bulkJamaahModal, setBulkJamaahModal] = useState(null);
   const [selGroup, setSelGroup] = useState(null);
 
   /* ---------- save queue (anti race-condition) ---------- */
@@ -1596,7 +1877,13 @@ function FinanceApp({ session }) {
 
   const filteredTx = useMemo(() => {
     if (!data) return [];
-    let list = [...data.tx].sort((a, b) => new Date(b.date) - new Date(a.date));
+    const originalOrder = new Map((data.tx || []).map((t, i) => [t.id, i]));
+    const timeOf = (t) => new Date(t.date || 0).getTime() || 0;
+    let list = [...(data.tx || [])].sort((a, b) => {
+      const byDate = timeOf(b) - timeOf(a);
+      if (byDate !== 0) return byDate;
+      return (originalOrder.get(b.id) ?? 0) - (originalOrder.get(a.id) ?? 0);
+    });
     if (ownFilter === "PT")
       list = list.filter((t) => t.ownership === "COMPANY");
     else if (ownFilter === "PB")
@@ -1740,36 +2027,84 @@ function FinanceApp({ session }) {
       .sort((a, b) => b.value - a.value);
   }, [data, catById]);
 
-  /* ---------- mutations ---------- */
-  const patch = (fn) =>
-    setData((d) => {
-      const nd = structuredClone(d);
-      fn(nd);
-      return nd;
-    });
+  /* ---------- mutations + undo ---------- */
+  const rememberUndo = (label, before) => {
+    if (!before) return;
+    setUndoStack((stack) =>
+      [
+        {
+          id: uid("undo"),
+          label,
+          at: new Date().toISOString(),
+          data: structuredClone(before),
+        },
+        ...stack,
+      ].slice(0, 20)
+    );
+  };
+  const patch = (fn, label = "Perubahan data") => {
+    if (!data) return;
+    const before = structuredClone(data);
+    const nd = structuredClone(data);
+    fn(nd);
+    rememberUndo(label, before);
+    setData(nd);
+  };
+  const undoTo = (id) => {
+    const entry = undoStack.find((x) => x.id === id) || undoStack[0];
+    if (!entry || !data) return;
+    if (!confirmAct("Undo: kembalikan data ke sebelum '" + entry.label + "'?"))
+      return;
+    const current = structuredClone(data);
+    setData(structuredClone(entry.data));
+    setUndoStack((stack) =>
+      [
+        {
+          id: uid("undo"),
+          label: "Batalkan undo",
+          at: new Date().toISOString(),
+          data: current,
+        },
+        ...stack.filter((x) => x.id !== entry.id),
+      ].slice(0, 20)
+    );
+    setUndoOpen(false);
+    notify("Undo berhasil.");
+  };
 
-  const saveTx = (t) =>
-    patch((d) => {
-      if (t.id) {
-        const i = d.tx.findIndex((x) => x.id === t.id);
-        if (i >= 0) d.tx[i] = t;
-      } else {
-        t.id = uid("tx");
-        d.tx.push(t);
-      }
-      if (t.receivableId) {
-        const r = d.receivables.find((x) => x.id === t.receivableId);
-        if (r) r.paid = Math.min(r.total, (r.paid || 0) + t.amount);
-      }
-      if (t.payableId) {
-        const p = d.payables.find((x) => x.id === t.payableId);
-        if (p) p.paid = Math.min(p.total, (p.paid || 0) + t.amount);
-      }
-    });
+  const saveTx = (input) =>
+    patch(
+      (d) => {
+        const list = Array.isArray(input) ? input : [input];
+        list.forEach((t) => {
+          if (t.id) {
+            const i = d.tx.findIndex((x) => x.id === t.id);
+            if (i >= 0) d.tx[i] = t;
+            else d.tx.push(t);
+          } else {
+            t.id = uid("tx");
+            d.tx.push(t);
+          }
+          if (t.receivableId) {
+            const r = d.receivables.find((x) => x.id === t.receivableId);
+            if (r) r.paid = Math.min(r.total, (r.paid || 0) + t.amount);
+          }
+          if (t.payableId) {
+            const p = d.payables.find((x) => x.id === t.payableId);
+            if (p) p.paid = Math.min(p.total, (p.paid || 0) + t.amount);
+          }
+        });
+      },
+      Array.isArray(input)
+        ? "Tambah transaksi + biaya admin"
+        : input.id
+        ? "Edit transaksi"
+        : "Tambah transaksi"
+    );
   const delTx = (id) =>
     patch((d) => {
       d.tx = d.tx.filter((x) => x.id !== id);
-    });
+    }, "Hapus transaksi");
   const importTx = (list) =>
     patch((d) => {
       const seen = new Set(d.tx.map((t) => t.importKey).filter(Boolean));
@@ -1779,48 +2114,95 @@ function FinanceApp({ session }) {
         d.tx.push(t);
         seen.add(t.importKey);
       });
-    });
-  const saveAcc = (a) =>
+    }, "Import " + list.length + " transaksi");
+  const saveDeal = (deal) =>
     patch((d) => {
-      if (a.id && d.accounts.find((x) => x.id === a.id))
-        d.accounts = d.accounts.map((x) => (x.id === a.id ? a : x));
-      else {
-        a.id = uid("acc");
-        d.accounts.push(a);
-      }
-    });
+      const dealId = uid("deal");
+      const date = deal.date
+        ? new Date(deal.date).toISOString()
+        : new Date().toISOString();
+      const label = deal.label || "";
+      const push = (type, side, fallbackDesc) => {
+        const amount = Math.round(Number(side.amount) || 0);
+        if (amount <= 0 || !side.accountId) return;
+        const acc = d.accounts.find((a) => a.id === side.accountId);
+        d.tx.push({
+          id: uid("tx"),
+          type,
+          date,
+          amount,
+          accountId: side.accountId,
+          ownership: acc?.ownership || "COMPANY",
+          categoryId: side.categoryId || null,
+          contactId: side.contactId || null,
+          productId: null,
+          toAccountId: null,
+          fee: 0,
+          method: deal.method || "Transfer",
+          reference: "",
+          description: side.description || label || fallbackDesc,
+          receivableId: null,
+          payableId: null,
+          refundOfTxId: null,
+          groupId: null,
+          dealId,
+          dealLabel: label,
+        });
+      };
+      push("income", deal.in, "Uang masuk" + (label ? " — " + label : ""));
+      push("expense", deal.out, "Uang keluar" + (label ? " — " + label : ""));
+      push("expense", deal.admin, "Biaya admin" + (label ? " — " + label : ""));
+    }, "Tambah transaksi masuk+keluar");
+  const saveAcc = (a) =>
+    patch(
+      (d) => {
+        if (a.id && d.accounts.find((x) => x.id === a.id))
+          d.accounts = d.accounts.map((x) => (x.id === a.id ? a : x));
+        else {
+          a.id = uid("acc");
+          d.accounts.push(a);
+        }
+      },
+      a.id ? "Edit rekening" : "Tambah rekening"
+    );
   const delAcc = (id) =>
     patch((d) => {
       d.accounts = d.accounts.filter((x) => x.id !== id);
-    });
+    }, "Hapus rekening");
   const saveContact = (c) =>
-    patch((d) => {
-      if (c.id && d.contacts.find((x) => x.id === c.id))
-        d.contacts = d.contacts.map((x) => (x.id === c.id ? c : x));
-      else {
-        c.id = uid("ct");
-        d.contacts.push(c);
-      }
-    });
+    patch(
+      (d) => {
+        if (c.id && d.contacts.find((x) => x.id === c.id))
+          d.contacts = d.contacts.map((x) => (x.id === c.id ? c : x));
+        else {
+          c.id = uid("ct");
+          d.contacts.push(c);
+        }
+      },
+      c.id ? "Edit kontak" : "Tambah kontak"
+    );
   const delContact = (id) =>
     patch((d) => {
       d.contacts = d.contacts.filter((x) => x.id !== id);
-    });
+    }, "Hapus kontak");
   const saveCat = (c) =>
-    patch((d) => {
-      if (c.id && d.categories.find((x) => x.id === c.id))
-        d.categories = d.categories.map((x) =>
-          x.id === c.id ? { ...x, ...c } : x
-        );
-      else {
-        c.id = uid("cat");
-        d.categories.push(c);
-      }
-    });
+    patch(
+      (d) => {
+        if (c.id && d.categories.find((x) => x.id === c.id))
+          d.categories = d.categories.map((x) =>
+            x.id === c.id ? { ...x, ...c } : x
+          );
+        else {
+          c.id = uid("cat");
+          d.categories.push(c);
+        }
+      },
+      c.id ? "Edit kategori" : "Tambah kategori"
+    );
   const delCat = (id) =>
     patch((d) => {
       d.categories = d.categories.filter((x) => x.id !== id);
-    });
+    }, "Hapus kategori");
   const saveAR = (r, kind) =>
     patch((d) => {
       const arr = kind === "rc" ? "receivables" : "payables";
@@ -1889,7 +2271,11 @@ function FinanceApp({ session }) {
         perGram: Number(perGram) || 0,
         updatedAt: new Date().toISOString(),
       };
-    });
+    }, "Ubah harga emas");
+  const updateCompany = (changes) =>
+    patch((d) => {
+      d.company = { ...d.company, ...changes };
+    }, "Ubah profil perusahaan");
   const loadInitialGold = () =>
     patch((d) => {
       d.assets = INITIAL_GOLD.map((g) => ({ ...g }));
@@ -1927,22 +2313,99 @@ function FinanceApp({ session }) {
     );
   };
   const saveGroup = (g) =>
-    patch((d) => {
-      if (g.id && d.groups.find((x) => x.id === g.id))
-        d.groups = d.groups.map((x) => (x.id === g.id ? g : x));
-      else {
-        g.id = uid("grp");
-        g.services = g.services || emptyServices();
-        d.groups.push(g);
-      }
-    });
+    patch(
+      (d) => {
+        const txDraft = g.__txDraft || {};
+        const group = { ...g };
+        delete group.__txDraft;
+
+        if (group.id && d.groups.find((x) => x.id === group.id))
+          d.groups = d.groups.map((x) => (x.id === group.id ? group : x));
+        else {
+          group.id = uid("grp");
+          group.services = group.services || emptyServices();
+          d.groups.push(group);
+        }
+
+        const groupId = group.id;
+        const groupName = group.name || "Rombongan";
+        const txDate = txDraft.date
+          ? new Date(txDraft.date).toISOString()
+          : new Date().toISOString();
+        const accountId = txDraft.accountId || defaultGroupAccount(d);
+        const ownership =
+          d.accounts.find((a) => a.id === accountId)?.ownership || "COMPANY";
+        const addGroupTx = (type, amount, extra = {}) => {
+          amount = Math.round(Number(amount) || 0);
+          if (amount <= 0 || !accountId) return;
+          d.tx.push({
+            id: uid("tx"),
+            type,
+            date: txDate,
+            amount,
+            accountId,
+            ownership,
+            categoryId: extra.categoryId || null,
+            contactId: extra.contactId || null,
+            productId: null,
+            toAccountId: null,
+            fee: 0,
+            method: txDraft.method || "Transfer",
+            reference: extra.reference || "",
+            description: extra.description || "",
+            receivableId: null,
+            payableId: null,
+            refundOfTxId: null,
+            groupId,
+          });
+        };
+
+        addGroupTx("income", txDraft.incomeAmount, {
+          categoryId: txDraft.incomeCategoryId || defaultIncomeCategory(d),
+          contactId: txDraft.incomeContactId || null,
+          reference: txDraft.incomeReference || "",
+          description:
+            txDraft.incomeDescription ||
+            "Pemasukan " +
+              groupName +
+              " (" +
+              (group.packageType || "Paket") +
+              ")",
+        });
+        addGroupTx("expense", txDraft.expenseAmount, {
+          categoryId: txDraft.expenseCategoryId || defaultExpenseCategory(d),
+          contactId: txDraft.expenseContactId || null,
+          reference: txDraft.expenseReference || "",
+          description:
+            txDraft.expenseDescription ||
+            "Pengeluaran " +
+              groupName +
+              " (" +
+              (group.packageType || "Paket") +
+              ")",
+        });
+        addGroupTx("expense", txDraft.adminAmount, {
+          categoryId: txDraft.adminCategoryId || defaultAdminCategory(d),
+          contactId: txDraft.expenseContactId || null,
+          reference: txDraft.expenseReference || "",
+          description:
+            txDraft.adminDescription ||
+            "Biaya admin " +
+              groupName +
+              " (" +
+              (group.packageType || "Paket") +
+              ")",
+        });
+      },
+      g.id ? "Edit rombongan" : "Tambah rombongan"
+    );
   const delGroup = (id) =>
     patch((d) => {
       d.groups = d.groups.filter((x) => x.id !== id);
       d.jamaah = d.jamaah.map((j) =>
         j.groupId === id ? { ...j, groupId: "" } : j
       );
-    });
+    }, "Hapus rombongan");
   const setService = (groupId, sid, po) =>
     patch((d) => {
       const g = d.groups.find((x) => x.id === groupId);
@@ -1959,20 +2422,31 @@ function FinanceApp({ session }) {
           ...po,
         };
       }
-    });
+    }, "Ubah pelayanan");
   const saveJamaah = (j) =>
+    patch(
+      (d) => {
+        if (j.id && d.jamaah.find((x) => x.id === j.id))
+          d.jamaah = d.jamaah.map((x) => (x.id === j.id ? j : x));
+        else {
+          j.id = uid("jm");
+          d.jamaah.push(j);
+        }
+      },
+      j.id ? "Edit jamaah" : "Tambah jamaah"
+    );
+  const importJamaah = (list) =>
     patch((d) => {
-      if (j.id && d.jamaah.find((x) => x.id === j.id))
-        d.jamaah = d.jamaah.map((x) => (x.id === j.id ? j : x));
-      else {
+      list.forEach((j) => {
         j.id = uid("jm");
         d.jamaah.push(j);
-      }
-    });
+      });
+    }, "Import " + list.length + " jamaah");
+
   const delJamaah = (id) =>
     patch((d) => {
       d.jamaah = d.jamaah.filter((x) => x.id !== id);
-    });
+    }, "Hapus jamaah");
 
   if (!loaded || !data) {
     return (
@@ -2077,6 +2551,62 @@ function FinanceApp({ session }) {
             <h1>{pageTitle}</h1>
           </div>
           <div className="topbar-actions">
+            <div className="undo-wrap">
+              <button
+                className="btn btn-out undo-main"
+                disabled={!undoStack.length}
+                onClick={() => setUndoOpen((v) => !v)}
+                title={
+                  undoStack.length
+                    ? "Lihat riwayat undo"
+                    : "Belum ada perubahan untuk di-undo"
+                }
+              >
+                <RotateCcw size={15} /> Undo
+                {undoStack.length ? (
+                  <span className="undo-count">{undoStack.length}</span>
+                ) : null}
+              </button>
+              {undoOpen && (
+                <div className="undo-menu">
+                  <div className="undo-head">
+                    <div>
+                      <b>Riwayat Undo</b>
+                      <span>Maksimal 20 perubahan terakhir</span>
+                    </div>
+                    <button
+                      className="icon-btn sm"
+                      onClick={() => setUndoOpen(false)}
+                    >
+                      <X size={13} />
+                    </button>
+                  </div>
+                  <button
+                    className="undo-primary"
+                    onClick={() => undoTo(undoStack[0]?.id)}
+                  >
+                    <RotateCcw size={14} /> Undo aksi terakhir
+                  </button>
+                  <div className="undo-list">
+                    {undoStack.map((u) => (
+                      <button
+                        key={u.id}
+                        className="undo-item"
+                        onClick={() => undoTo(u.id)}
+                      >
+                        <span>{u.label}</span>
+                        <small>
+                          {new Date(u.at).toLocaleTimeString("id-ID", {
+                            hour: "2-digit",
+                            minute: "2-digit",
+                          })}
+                        </small>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
             <SyncBadge status={sync} />
             <div className="seg">
               {[
@@ -2093,6 +2623,13 @@ function FinanceApp({ session }) {
                 </button>
               ))}
             </div>
+            <button
+              className="btn btn-out"
+              onClick={() => setDealModal({})}
+              title="Catat uang masuk dan uang keluar sekaligus"
+            >
+              <Repeat size={16} /> Masuk + Keluar
+            </button>
             <button
               className="btn btn-primary"
               onClick={() => setTxModal({ type: "income" })}
@@ -2115,6 +2652,7 @@ function FinanceApp({ session }) {
                 filteredTx,
                 setView: goView,
                 setTxModal,
+                setDealModal,
               }}
             />
           )}
@@ -2128,6 +2666,7 @@ function FinanceApp({ session }) {
                 setTxModal,
                 delTx,
                 setImportModal,
+                setDealModal,
               }}
             />
           )}
@@ -2179,13 +2718,15 @@ function FinanceApp({ session }) {
             />
           )}
           {view === "jamaah" && (
-            <JamaahView {...{ data, setJamaahModal, delJamaah }} />
+            <JamaahView
+              {...{ data, setJamaahModal, delJamaah, setBulkJamaahModal }}
+            />
           )}
           {view === "pengaturan" && (
             <Pengaturan
               {...{
                 data,
-                setData,
+                updateCompany,
                 setCatModal,
                 delCat,
                 setProductModal,
@@ -2218,6 +2759,19 @@ function FinanceApp({ session }) {
                 }
               : null
           }
+        />
+      )}
+      {dealModal && (
+        <DealForm
+          init={dealModal}
+          data={data}
+          onClose={() => setDealModal(null)}
+          onSave={(deal) => {
+            saveDeal(deal);
+            setDealModal(null);
+          }}
+          onAddContact={quickAddContact}
+          onAddCategory={quickAddCat}
         />
       )}
       {accModal && (
@@ -2279,6 +2833,9 @@ function FinanceApp({ session }) {
       {groupModal && (
         <GroupForm
           init={groupModal}
+          data={data}
+          onAddCategory={quickAddCat}
+          onAddContact={quickAddContact}
           onClose={() => setGroupModal(null)}
           onSave={(g) => {
             saveGroup(g);
@@ -2294,6 +2851,18 @@ function FinanceApp({ session }) {
           onSave={(j) => {
             saveJamaah(j);
             setJamaahModal(null);
+          }}
+        />
+      )}
+      {bulkJamaahModal && (
+        <BulkJamaahImport
+          init={bulkJamaahModal}
+          data={data}
+          onClose={() => setBulkJamaahModal(null)}
+          onImport={(list) => {
+            importJamaah(list);
+            setBulkJamaahModal(null);
+            notify("Berhasil menambah " + list.length + " jamaah.");
           }}
         />
       )}
@@ -2344,6 +2913,7 @@ function Dashboard({
   filteredTx,
   setView,
   setTxModal,
+  setDealModal,
 }) {
   const PIE_COLORS = [
     "#11704f",
@@ -2590,9 +3160,17 @@ function Dashboard({
       <div className="card">
         <div className="card-head">
           <h3>Transaksi Terbaru</h3>
-          <button className="link" onClick={() => setView("transaksi")}>
-            Lihat semua <ChevronRight size={14} />
-          </button>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <button
+              className="btn btn-out btn-xs"
+              onClick={() => setDealModal({})}
+            >
+              <Repeat size={14} /> Masuk + Keluar
+            </button>
+            <button className="link" onClick={() => setView("transaksi")}>
+              Lihat semua <ChevronRight size={14} />
+            </button>
+          </div>
         </div>
         <div className="table-wrap">
           <table className="table">
@@ -2694,6 +3272,7 @@ function Transaksi({
   setTxModal,
   delTx,
   setImportModal,
+  setDealModal,
 }) {
   const [q, setQ] = useState("");
   const [typeF, setTypeF] = useState("all");
@@ -2769,6 +3348,16 @@ function Transaksi({
       return sort.dir === "asc" ? cmp : -cmp;
     });
   const txById = Object.fromEntries(filteredTx.map((t) => [t.id, t]));
+  const dealMap = {};
+  filteredTx.forEach((t) => {
+    if (!t.dealId) return;
+    const m = (dealMap[t.dealId] = dealMap[t.dealId] || {
+      income: 0,
+      expense: 0,
+    });
+    if (t.type === "income") m.income += Number(t.amount) || 0;
+    else if (t.type === "expense") m.expense += Number(t.amount) || 0;
+  });
   const sumIn = list
     .filter((t) => t.type === "income")
     .reduce((s, t) => s + t.amount, 0);
@@ -2805,6 +3394,9 @@ function Transaksi({
         <div className="grow" />
         <button className="btn btn-primary" onClick={() => setImportModal({})}>
           <Download size={15} /> Import Mutasi
+        </button>
+        <button className="btn btn-out" onClick={() => setDealModal({})}>
+          <Repeat size={15} /> Masuk + Keluar
         </button>
         <button
           className="btn btn-out"
@@ -2918,6 +3510,21 @@ function Transaksi({
                     {t.description || <span className="muted">—</span>}
                     {t.reference && (
                       <div className="muted xs mono">{t.reference}</div>
+                    )}
+                    {t.dealId && dealMap[t.dealId] && (
+                      <div className="muted xs refund-ref">
+                        🔗{" "}
+                        {t.type === "income"
+                          ? "Pasangan keluar −" +
+                            rupiah(dealMap[t.dealId].expense) +
+                            " · Profit " +
+                            rupiah(
+                              dealMap[t.dealId].income -
+                                dealMap[t.dealId].expense
+                            )
+                          : "Pasangan masuk +" +
+                            rupiah(dealMap[t.dealId].income)}
+                      </div>
                     )}
                     {t.refundOfTxId && txById[t.refundOfTxId] && (
                       <div className="muted xs refund-ref">
@@ -3572,56 +4179,86 @@ function LaporanLabaRugi({ data, catById, from, to, balances }) {
     (t) => inRange(t.date) && OWN[t.ownership]?.business
   );
   const txById = Object.fromEntries((data.tx || []).map((t) => [t.id, t]));
-  const carryTx = txAll.filter(
-    (t) => catById[t.categoryId]?.carryover && t.type === "expense"
+  const carryTx = txAll.filter((t) =>
+    isCarryoverExpense(t, catById[t.categoryId])
   );
   const carryTotal = carryTx.reduce((s, t) => s + t.amount, 0);
   const equityTx = txAll.filter(
-    (t) => catById[t.categoryId]?.equity && t.type === "income"
+    (t) => isEquityCat(catById[t.categoryId]) && t.type === "income"
   );
   const equityTotal = equityTx.reduce((s, t) => s + t.amount, 0);
-  const revByCat = {},
-    expByCat = {},
+  const revBusinessByCat = {},
+    revFinanceByCat = {},
+    directCostByCat = {},
+    operatingExpenseByCat = {},
+    expFinanceByCat = {},
     refundRevByCat = {},
     refundExpByCat = {};
-  let rev = 0,
-    exp = 0,
+  let revBusiness = 0,
+    revFinance = 0,
+    directCost = 0,
+    operatingExpense = 0,
+    expFinance = 0,
     refundRev = 0,
     refundExp = 0;
   txAll.forEach((t) => {
     const eff = reportEffect(t, txById);
     const revCat = catById[eff.revCatId];
     const expCat = catById[eff.expCatId];
-    if (eff.revDelta && !revCat?.carryover && !revCat?.equity) {
-      rev += eff.revDelta;
+    if (eff.revDelta && !isEquityCat(revCat)) {
+      const origin = eff.origin || t;
       const k = revCat?.name || "Lainnya";
+      if (isFinancialIncome(t, revCat, origin)) {
+        revFinance += eff.revDelta;
+        addAmount(revFinanceByCat, k, eff.revDelta);
+      } else {
+        revBusiness += eff.revDelta;
+        addAmount(revBusinessByCat, k, eff.revDelta);
+      }
       if (eff.revDelta < 0) {
         refundRev += Math.abs(eff.revDelta);
         refundRevByCat[k] = (refundRevByCat[k] || 0) + Math.abs(eff.revDelta);
       }
-      revByCat[k] = (revByCat[k] || 0) + eff.revDelta;
     }
-    if (eff.expDelta && !expCat?.carryover && !expCat?.equity) {
-      exp += eff.expDelta;
+    if (
+      eff.expDelta &&
+      !isCarryoverExpense(t, expCat) &&
+      !isEquityCat(expCat)
+    ) {
+      const origin = eff.origin || t;
       const k = expCat?.name || "Lainnya";
+      if (isBankTaxOrFinanceCost(t, expCat, origin)) {
+        expFinance += eff.expDelta;
+        addAmount(expFinanceByCat, k, eff.expDelta);
+      } else if (isDirectCost(t, expCat, origin)) {
+        directCost += eff.expDelta;
+        addAmount(directCostByCat, k, eff.expDelta);
+      } else {
+        operatingExpense += eff.expDelta;
+        addAmount(operatingExpenseByCat, k, eff.expDelta);
+      }
       if (eff.expDelta < 0) {
         refundExp += Math.abs(eff.expDelta);
         refundExpByCat[k] = (refundExpByCat[k] || 0) + Math.abs(eff.expDelta);
       }
-      expByCat[k] = (expByCat[k] || 0) + eff.expDelta;
     }
   });
-  const laba = rev - exp;
-  const margin = rev > 0 ? (laba / rev) * 100 : 0;
+  const rev = revBusiness + revFinance;
+  const exp = directCost + operatingExpense + expFinance;
+  const labaKotor = revBusiness - directCost;
+  const labaUsaha = labaKotor - operatingExpense;
+  const laba = labaUsaha + revFinance - expFinance;
+  const grossMargin = revBusiness > 0 ? (labaKotor / revBusiness) * 100 : 0;
+  const operatingMargin = revBusiness > 0 ? (labaUsaha / revBusiness) * 100 : 0;
 
   const aoa = [
     ["PT " + data.company.name],
     ["LAPORAN LABA RUGI"],
     ["Periode: " + fmtDate(from) + " — " + fmtDate(to)],
     [],
-    ["PENDAPATAN", ""],
-    ...Object.entries(revByCat).map(([k, v]) => [k, Math.round(v)]),
-    ["Total Pendapatan", Math.round(rev)],
+    ["PENDAPATAN USAHA", ""],
+    ...Object.entries(revBusinessByCat).map(([k, v]) => [k, Math.round(v)]),
+    ["Total Pendapatan Usaha", Math.round(revBusiness)],
     ...(refundRev > 0
       ? [
           [],
@@ -3633,9 +4270,40 @@ function LaporanLabaRugi({ data, catById, from, to, balances }) {
         ]
       : []),
     [],
-    ["BEBAN & PENGELUARAN", ""],
-    ...Object.entries(expByCat).map(([k, v]) => [k, Math.round(v)]),
-    ["Total Beban", Math.round(exp)],
+    ["HPP / BIAYA LANGSUNG PAKET", ""],
+    ...Object.entries(directCostByCat).map(([k, v]) => [k, Math.round(v)]),
+    ["Total HPP / Biaya Langsung Paket", Math.round(directCost)],
+    ["LABA KOTOR (" + grossMargin.toFixed(1) + "%)", Math.round(labaKotor)],
+    [],
+    ["BEBAN OPERASIONAL", ""],
+    ...Object.entries(operatingExpenseByCat).map(([k, v]) => [
+      k,
+      Math.round(v),
+    ]),
+    ["Total Beban Operasional", Math.round(operatingExpense)],
+    ["LABA USAHA (" + operatingMargin.toFixed(1) + "%)", Math.round(labaUsaha)],
+    ...(revFinance !== 0
+      ? [
+          [],
+          ["PENDAPATAN KEUANGAN / LAIN-LAIN", ""],
+          ...Object.entries(revFinanceByCat).map(([k, v]) => [
+            k,
+            Math.round(v),
+          ]),
+          ["Total Pendapatan Keuangan / Lain-lain", Math.round(revFinance)],
+        ]
+      : []),
+    ...(expFinance !== 0
+      ? [
+          [],
+          ["BEBAN KEUANGAN / PAJAK FINAL", ""],
+          ...Object.entries(expFinanceByCat).map(([k, v]) => [
+            k,
+            Math.round(v),
+          ]),
+          ["Total Beban Keuangan / Pajak Final", Math.round(expFinance)],
+        ]
+      : []),
     ...(refundExp > 0
       ? [
           [],
@@ -3647,7 +4315,9 @@ function LaporanLabaRugi({ data, catById, from, to, balances }) {
         ]
       : []),
     [],
-    ["LABA BERSIH (" + margin.toFixed(1) + "%)", Math.round(laba)],
+    ["Total Pendapatan", Math.round(rev)],
+    ["Total Beban", Math.round(exp)],
+    ["LABA / RUGI BERSIH", Math.round(laba)],
     ...(carryTotal > 0
       ? [
           [],
@@ -3695,18 +4365,26 @@ function LaporanLabaRugi({ data, catById, from, to, balances }) {
         </div>
         <div className="report-sec">
           <div className="report-row head">
-            <span>PENDAPATAN</span>
+            <span>PENDAPATAN USAHA</span>
             <span></span>
           </div>
-          {Object.entries(revByCat).map(([k, v]) => (
+          {Object.entries(revBusinessByCat).length === 0 && (
+            <div className="report-row">
+              <span className="muted">
+                Belum ada pendapatan usaha pada periode ini
+              </span>
+              <span className="mono">Rp 0</span>
+            </div>
+          )}
+          {Object.entries(revBusinessByCat).map(([k, v]) => (
             <div key={k} className="report-row">
               <span>{k}</span>
               <span className="mono">{rupiah(v)}</span>
             </div>
           ))}
           <div className="report-row total">
-            <span>Total Pendapatan</span>
-            <span className="mono">{rupiah(rev)}</span>
+            <span>Total Pendapatan Usaha</span>
+            <span className="mono">{rupiah(revBusiness)}</span>
           </div>
           {refundRev > 0 && (
             <div className="report-row">
@@ -3719,18 +4397,54 @@ function LaporanLabaRugi({ data, catById, from, to, balances }) {
         </div>
         <div className="report-sec">
           <div className="report-row head">
-            <span>BEBAN & PENGELUARAN</span>
+            <span>HPP / BIAYA LANGSUNG PAKET</span>
             <span></span>
           </div>
-          {Object.entries(expByCat).map(([k, v]) => (
+          {Object.entries(directCostByCat).length === 0 && (
+            <div className="report-row">
+              <span className="muted">
+                Belum ada biaya langsung paket pada periode ini
+              </span>
+              <span className="mono">(Rp 0)</span>
+            </div>
+          )}
+          {Object.entries(directCostByCat).map(([k, v]) => (
             <div key={k} className="report-row">
               <span>{k}</span>
               <span className="mono">({rupiah(v)})</span>
             </div>
           ))}
           <div className="report-row total">
-            <span>Total Beban</span>
-            <span className="mono">({rupiah(exp)})</span>
+            <span>Total HPP / Biaya Langsung Paket</span>
+            <span className="mono">({rupiah(directCost)})</span>
+          </div>
+        </div>
+        <div className={"report-row grand " + (labaKotor >= 0 ? "pos" : "neg")}>
+          <span>LABA KOTOR ({grossMargin.toFixed(1)}%)</span>
+          <span className="mono">{rupiah(labaKotor)}</span>
+        </div>
+        <div className="report-sec">
+          <div className="report-row head">
+            <span>BEBAN OPERASIONAL</span>
+            <span></span>
+          </div>
+          {Object.entries(operatingExpenseByCat).length === 0 && (
+            <div className="report-row">
+              <span className="muted">
+                Belum ada beban operasional pada periode ini
+              </span>
+              <span className="mono">(Rp 0)</span>
+            </div>
+          )}
+          {Object.entries(operatingExpenseByCat).map(([k, v]) => (
+            <div key={k} className="report-row">
+              <span>{k}</span>
+              <span className="mono">({rupiah(v)})</span>
+            </div>
+          ))}
+          <div className="report-row total">
+            <span>Total Beban Operasional</span>
+            <span className="mono">({rupiah(operatingExpense)})</span>
           </div>
           {refundExp > 0 && (
             <div className="report-row">
@@ -3741,8 +4455,60 @@ function LaporanLabaRugi({ data, catById, from, to, balances }) {
             </div>
           )}
         </div>
+        <div className={"report-row grand " + (labaUsaha >= 0 ? "pos" : "neg")}>
+          <span>LABA USAHA ({operatingMargin.toFixed(1)}%)</span>
+          <span className="mono">{rupiah(labaUsaha)}</span>
+        </div>
+        {(revFinance !== 0 || expFinance !== 0) && (
+          <div className="report-sec">
+            {revFinance !== 0 && (
+              <>
+                <div className="report-row head">
+                  <span>PENDAPATAN KEUANGAN / LAIN-LAIN</span>
+                  <span></span>
+                </div>
+                {Object.entries(revFinanceByCat).map(([k, v]) => (
+                  <div key={k} className="report-row">
+                    <span>{k}</span>
+                    <span className="mono">{rupiah(v)}</span>
+                  </div>
+                ))}
+                <div className="report-row total">
+                  <span>Total Pendapatan Keuangan / Lain-lain</span>
+                  <span className="mono">{rupiah(revFinance)}</span>
+                </div>
+              </>
+            )}
+            {expFinance !== 0 && (
+              <>
+                <div className="report-row head" style={{ marginTop: 10 }}>
+                  <span>BEBAN KEUANGAN / PAJAK FINAL</span>
+                  <span></span>
+                </div>
+                {Object.entries(expFinanceByCat).map(([k, v]) => (
+                  <div key={k} className="report-row">
+                    <span>{k}</span>
+                    <span className="mono">({rupiah(v)})</span>
+                  </div>
+                ))}
+                <div className="report-row total">
+                  <span>Total Beban Keuangan / Pajak Final</span>
+                  <span className="mono">({rupiah(expFinance)})</span>
+                </div>
+              </>
+            )}
+          </div>
+        )}
+        <div className="report-row total">
+          <span>Total Pendapatan</span>
+          <span className="mono">{rupiah(rev)}</span>
+        </div>
+        <div className="report-row total">
+          <span>Total Beban</span>
+          <span className="mono">({rupiah(exp)})</span>
+        </div>
         <div className={"report-row grand " + (laba >= 0 ? "pos" : "neg")}>
-          <span>LABA BERSIH ({margin.toFixed(1)}%)</span>
+          <span>LABA / RUGI BERSIH</span>
           <span className="mono">{rupiah(laba)}</span>
         </div>
         {carryTotal > 0 && (
@@ -3826,20 +4592,42 @@ function LaporanArusKas({ data, balances, catById, from, to }) {
   );
 
   const incByCat = {},
-    expByCat = {};
-  let totalMasuk = 0,
-    totalKeluar = 0;
+    incFinanceByCat = {},
+    expByCat = {},
+    expFinanceByCat = {},
+    carryCashByCat = {};
+  let totalMasukUsaha = 0,
+    totalMasukFinance = 0,
+    totalKeluarUsaha = 0,
+    totalKeluarFinance = 0,
+    totalKeluarCarry = 0;
   txPeriod.forEach((t) => {
+    const cat = catById[t.categoryId];
     if (t.type === "income") {
-      totalMasuk += t.amount;
-      const k = catById[t.categoryId]?.name || "Lainnya";
-      incByCat[k] = (incByCat[k] || 0) + t.amount;
+      const k = cat?.name || "Lainnya";
+      if (isFinancialIncome(t, cat)) {
+        totalMasukFinance += t.amount;
+        addAmount(incFinanceByCat, k, t.amount);
+      } else {
+        totalMasukUsaha += t.amount;
+        addAmount(incByCat, k, t.amount);
+      }
     } else if (t.type === "expense") {
-      totalKeluar += t.amount;
-      const k = catById[t.categoryId]?.name || "Lainnya";
-      expByCat[k] = (expByCat[k] || 0) + t.amount;
+      const k = cat?.name || "Lainnya";
+      if (isCarryoverExpense(t, cat)) {
+        totalKeluarCarry += t.amount;
+        addAmount(carryCashByCat, k, t.amount);
+      } else if (isBankTaxOrFinanceCost(t, cat)) {
+        totalKeluarFinance += t.amount;
+        addAmount(expFinanceByCat, k, t.amount);
+      } else {
+        totalKeluarUsaha += t.amount;
+        addAmount(expByCat, k, t.amount);
+      }
     }
   });
+  const totalMasuk = totalMasukUsaha + totalMasukFinance;
+  const totalKeluar = totalKeluarUsaha + totalKeluarFinance + totalKeluarCarry;
   const netOperasi = totalMasuk - totalKeluar;
   const bizAccts = data.accounts.filter((a) => OWN[a.ownership]?.business);
   const saldoAwal = bizAccts.reduce((s, a) => s + a.initial, 0);
@@ -3851,11 +4639,45 @@ function LaporanArusKas({ data, balances, catById, from, to }) {
     ["Periode: " + fmtDate(from) + " — " + fmtDate(to)],
     [],
     ["A. AKTIVITAS OPERASI", ""],
-    ["  Penerimaan:", ""],
+    ["  Penerimaan usaha:", ""],
     ...Object.entries(incByCat).map(([k, v]) => ["    " + k, Math.round(v)]),
-    ["  Total Penerimaan Operasi", Math.round(totalMasuk)],
-    ["  Pengeluaran:", ""],
+    ["  Total Penerimaan Usaha", Math.round(totalMasukUsaha)],
+    ...(totalMasukFinance !== 0
+      ? [
+          ["  Penerimaan keuangan / lain-lain:", ""],
+          ...Object.entries(incFinanceByCat).map(([k, v]) => [
+            "    " + k,
+            Math.round(v),
+          ]),
+          ["  Total Penerimaan Keuangan", Math.round(totalMasukFinance)],
+        ]
+      : []),
+    ["  Pengeluaran usaha:", ""],
     ...Object.entries(expByCat).map(([k, v]) => ["    " + k, -Math.round(v)]),
+    ["  Total Pengeluaran Usaha", -Math.round(totalKeluarUsaha)],
+    ...(totalKeluarFinance !== 0
+      ? [
+          ["  Pengeluaran keuangan / pajak final:", ""],
+          ...Object.entries(expFinanceByCat).map(([k, v]) => [
+            "    " + k,
+            -Math.round(v),
+          ]),
+          [
+            "  Total Pengeluaran Keuangan / Pajak Final",
+            -Math.round(totalKeluarFinance),
+          ],
+        ]
+      : []),
+    ...(totalKeluarCarry !== 0
+      ? [
+          ["  Pembayaran kewajiban lama:", ""],
+          ...Object.entries(carryCashByCat).map(([k, v]) => [
+            "    " + k,
+            -Math.round(v),
+          ]),
+          ["  Total Pembayaran Kewajiban Lama", -Math.round(totalKeluarCarry)],
+        ]
+      : []),
     ["  Total Pengeluaran Operasi", -Math.round(totalKeluar)],
     ["Arus Kas Bersih Aktivitas Operasi", Math.round(netOperasi)],
     [],
@@ -3903,7 +4725,7 @@ function LaporanArusKas({ data, balances, catById, from, to }) {
           </div>
           <div className="report-row" style={{ paddingLeft: 12 }}>
             <span className="muted sm" style={{ fontWeight: 600 }}>
-              Penerimaan:
+              Penerimaan usaha:
             </span>
           </div>
           {Object.entries(incByCat).map(([k, v]) => (
@@ -3916,12 +4738,37 @@ function LaporanArusKas({ data, balances, catById, from, to }) {
             className="report-row"
             style={{ paddingLeft: 12, fontWeight: 600 }}
           >
-            <span>Sub-total Penerimaan</span>
-            <span className="mono">{rupiah(totalMasuk)}</span>
+            <span>Sub-total Penerimaan Usaha</span>
+            <span className="mono">{rupiah(totalMasukUsaha)}</span>
           </div>
+          {totalMasukFinance !== 0 && (
+            <>
+              <div
+                className="report-row"
+                style={{ paddingLeft: 12, marginTop: 8 }}
+              >
+                <span className="muted sm" style={{ fontWeight: 600 }}>
+                  Penerimaan keuangan / lain-lain:
+                </span>
+              </div>
+              {Object.entries(incFinanceByCat).map(([k, v]) => (
+                <div key={k} className="report-row" style={{ paddingLeft: 24 }}>
+                  <span>{k}</span>
+                  <span className="mono">{rupiah(v)}</span>
+                </div>
+              ))}
+              <div
+                className="report-row"
+                style={{ paddingLeft: 12, fontWeight: 600 }}
+              >
+                <span>Sub-total Penerimaan Keuangan</span>
+                <span className="mono">{rupiah(totalMasukFinance)}</span>
+              </div>
+            </>
+          )}
           <div className="report-row" style={{ paddingLeft: 12, marginTop: 8 }}>
             <span className="muted sm" style={{ fontWeight: 600 }}>
-              Pengeluaran:
+              Pengeluaran usaha:
             </span>
           </div>
           {Object.entries(expByCat).map(([k, v]) => (
@@ -3936,11 +4783,69 @@ function LaporanArusKas({ data, balances, catById, from, to }) {
             className="report-row"
             style={{ paddingLeft: 12, fontWeight: 600 }}
           >
-            <span>Sub-total Pengeluaran</span>
+            <span>Sub-total Pengeluaran Usaha</span>
             <span className="mono" style={{ color: "var(--red)" }}>
-              ({rupiah(totalKeluar)})
+              ({rupiah(totalKeluarUsaha)})
             </span>
           </div>
+          {totalKeluarFinance !== 0 && (
+            <>
+              <div
+                className="report-row"
+                style={{ paddingLeft: 12, marginTop: 8 }}
+              >
+                <span className="muted sm" style={{ fontWeight: 600 }}>
+                  Pengeluaran keuangan / pajak final:
+                </span>
+              </div>
+              {Object.entries(expFinanceByCat).map(([k, v]) => (
+                <div key={k} className="report-row" style={{ paddingLeft: 24 }}>
+                  <span>{k}</span>
+                  <span className="mono" style={{ color: "var(--red)" }}>
+                    ({rupiah(v)})
+                  </span>
+                </div>
+              ))}
+              <div
+                className="report-row"
+                style={{ paddingLeft: 12, fontWeight: 600 }}
+              >
+                <span>Sub-total Pengeluaran Keuangan / Pajak Final</span>
+                <span className="mono" style={{ color: "var(--red)" }}>
+                  ({rupiah(totalKeluarFinance)})
+                </span>
+              </div>
+            </>
+          )}
+          {totalKeluarCarry !== 0 && (
+            <>
+              <div
+                className="report-row"
+                style={{ paddingLeft: 12, marginTop: 8 }}
+              >
+                <span className="muted sm" style={{ fontWeight: 600 }}>
+                  Pembayaran kewajiban lama:
+                </span>
+              </div>
+              {Object.entries(carryCashByCat).map(([k, v]) => (
+                <div key={k} className="report-row" style={{ paddingLeft: 24 }}>
+                  <span>{k}</span>
+                  <span className="mono" style={{ color: "var(--red)" }}>
+                    ({rupiah(v)})
+                  </span>
+                </div>
+              ))}
+              <div
+                className="report-row"
+                style={{ paddingLeft: 12, fontWeight: 600 }}
+              >
+                <span>Sub-total Pembayaran Kewajiban Lama</span>
+                <span className="mono" style={{ color: "var(--red)" }}>
+                  ({rupiah(totalKeluarCarry)})
+                </span>
+              </div>
+            </>
+          )}
           <div className="report-row total">
             <span>Arus Kas Bersih Aktivitas Operasi</span>
             <span
@@ -4168,14 +5073,31 @@ function LaporanPajak({ data, catById, from, to }) {
   );
 
   let rev = 0,
+    revFinance = 0,
     expTotal = 0,
-    expGaji = 0;
+    expGaji = 0,
+    finalBankTaxPaid = 0,
+    carryoverPaid = 0;
   txR.forEach((t) => {
-    if (t.type === "income") rev += t.amount;
-    else if (t.type === "expense") {
+    const cat = catById[t.categoryId];
+    if (t.type === "income" && !isEquityCat(cat)) {
+      if (isFinancialIncome(t, cat)) revFinance += t.amount;
+      else rev += t.amount;
+    } else if (t.type === "expense") {
+      if (isCarryoverExpense(t, cat)) {
+        carryoverPaid += t.amount;
+        return;
+      }
+      if (
+        /pajak dari bank|pajak final|pph final|pajak bunga|pajak deposito/i.test(
+          txText(t, cat)
+        )
+      ) {
+        finalBankTaxPaid += t.amount;
+        return;
+      }
       expTotal += t.amount;
-      const cat = catById[t.categoryId]?.name || "";
-      if (cat.toLowerCase().includes("gaji")) expGaji += t.amount;
+      if (isPayrollExpense(t, cat)) expGaji += t.amount;
     }
   });
   const labaKenaPajak = Math.max(0, rev - expTotal);
@@ -4183,6 +5105,7 @@ function LaporanPajak({ data, catById, from, to }) {
   const pphPasal21 = expGaji * 0.05;
   const pphPasal4 = rev * 0.005; // PPh Final jasa travel 0.5%
   const ppnRev = rev * 0.11; // PPN output (belum dikurangi pajak masukan)
+  const totalEstimasiPajak = pphBadan + pphPasal21 + pphPasal4 + ppnRev;
 
   const aoa = [
     ["PT " + data.company.name],
@@ -4190,7 +5113,8 @@ function LaporanPajak({ data, catById, from, to }) {
     ["Periode: " + fmtDate(from) + " — " + fmtDate(to)],
     [],
     ["A. PPh BADAN (22%)", ""],
-    ["  Pendapatan Bruto", Math.round(rev)],
+    ["  Pendapatan Bruto Usaha", Math.round(rev)],
+    ["  Pendapatan Keuangan / Bank (dipisah)", Math.round(revFinance)],
     ["  Beban Deductible", -Math.round(expTotal)],
     ["  Penghasilan Kena Pajak", Math.round(labaKenaPajak)],
     ["  Estimasi PPh Badan 22%", Math.round(pphBadan)],
@@ -4201,14 +5125,31 @@ function LaporanPajak({ data, catById, from, to }) {
     [],
     ["C. PPh PASAL 4 AYAT 2 FINAL — JASA TRAVEL (0.5%)", ""],
     ["  Estimasi PPh Final", Math.round(pphPasal4)],
+    ...(finalBankTaxPaid > 0
+      ? [
+          [],
+          ["CATATAN PAJAK FINAL BANK", ""],
+          [
+            "  PPh Final Bank yang sudah dipotong bank",
+            Math.round(finalBankTaxPaid),
+          ],
+        ]
+      : []),
+    ...(carryoverPaid > 0
+      ? [
+          [],
+          ["CATATAN PEMBAYARAN KEWAJIBAN LAMA", ""],
+          [
+            "  Pembayaran kewajiban lama (bukan beban periode ini)",
+            Math.round(carryoverPaid),
+          ],
+        ]
+      : []),
     [],
     ["D. PPN (11% dari Pendapatan Bruto)", ""],
     ["  PPN Output Estimasi", Math.round(ppnRev)],
     [],
-    [
-      "TOTAL ESTIMASI KEWAJIBAN PAJAK",
-      Math.round(pphBadan + pphPasal21 + ppnRev),
-    ],
+    ["TOTAL ESTIMASI KEWAJIBAN PAJAK", Math.round(totalEstimasiPajak)],
   ];
 
   return (
@@ -4245,6 +5186,14 @@ function LaporanPajak({ data, catById, from, to }) {
             <span>Pendapatan Bruto Bisnis</span>
             <span className="mono">{rupiah(rev)}</span>
           </div>
+          {revFinance > 0 && (
+            <div className="report-row">
+              <span className="muted">
+                Pendapatan Keuangan / Bank (dipisah dari omzet usaha)
+              </span>
+              <span className="mono">{rupiah(revFinance)}</span>
+            </div>
+          )}
           <div className="report-row">
             <span>Beban yang Dapat Dikurangkan</span>
             <span className="mono">({rupiah(expTotal)})</span>
@@ -4281,6 +5230,25 @@ function LaporanPajak({ data, catById, from, to }) {
             <span>Estimasi PPh Final</span>
             <span className="mono amt-expense">{rupiah(pphPasal4)}</span>
           </div>
+          {finalBankTaxPaid > 0 && (
+            <div className="report-row">
+              <span className="muted">
+                PPh Final Bank yang sudah dipotong bank
+              </span>
+              <span className="mono amt-expense">
+                {rupiah(finalBankTaxPaid)}
+              </span>
+            </div>
+          )}
+          {carryoverPaid > 0 && (
+            <div className="report-row">
+              <span className="muted">
+                Pembayaran kewajiban lama tidak dimasukkan sebagai beban pajak
+                periode ini
+              </span>
+              <span className="mono">{rupiah(carryoverPaid)}</span>
+            </div>
+          )}
         </div>
         <div className="report-sec">
           <div className="report-row head">
@@ -4300,9 +5268,7 @@ function LaporanPajak({ data, catById, from, to }) {
         </div>
         <div className="report-row grand">
           <span>TOTAL ESTIMASI PAJAK</span>
-          <span className="mono amt-expense">
-            {rupiah(pphBadan + pphPasal21 + ppnRev)}
-          </span>
+          <span className="mono amt-expense">{rupiah(totalEstimasiPajak)}</span>
         </div>
       </div>
       <div className="note">
@@ -4701,7 +5667,7 @@ function LaporanPerPaket({ data }) {
    ============================================================ */
 function Pengaturan({
   data,
-  setData,
+  updateCompany,
   setCatModal,
   delCat,
   setProductModal,
@@ -4718,24 +5684,14 @@ function Pengaturan({
             <input
               className="input"
               value={data.company.name}
-              onChange={(e) =>
-                setData((d) => ({
-                  ...d,
-                  company: { ...d.company, name: e.target.value },
-                }))
-              }
+              onChange={(e) => updateCompany({ name: e.target.value })}
             />
           </Field>
           <Field label="Bidang Usaha">
             <input
               className="input"
               value={data.company.field}
-              onChange={(e) =>
-                setData((d) => ({
-                  ...d,
-                  company: { ...d.company, field: e.target.value },
-                }))
-              }
+              onChange={(e) => updateCompany({ field: e.target.value })}
             />
           </Field>
         </div>
@@ -5027,6 +5983,7 @@ function GroupCard({ g, data, clash, onOpen, onEdit, onDelete }) {
   const prog = groupProgress(g);
   const jcount = data.jamaah.filter((j) => j.groupId === g.id).length;
   const alerts = groupAlerts(g);
+  const fin = groupFinance(g, data);
   const depN = daysUntil(g.departDate);
   const cdCls =
     depN === null
@@ -5062,6 +6019,24 @@ function GroupCard({ g, data, clash, onOpen, onEdit, onDelete }) {
         </span>
         <span>
           <Users size={13} /> {g.pax || jcount} pax · {jcount} terdata
+        </span>
+      </div>
+      <div className="group-money">
+        <span>
+          Masuk <b className="amt-income mono">{rupiah(fin.income)}</b>
+        </span>
+        <span>
+          Keluar <b className="amt-expense mono">{rupiah(fin.expense)}</b>
+        </span>
+        <span>
+          Profit{" "}
+          <b
+            className={
+              (fin.profit >= 0 ? "amt-income" : "amt-expense") + " mono"
+            }
+          >
+            {rupiah(fin.profit)}
+          </b>
         </span>
       </div>
       <div className="gc-prog">
@@ -5120,6 +6095,7 @@ function GroupDetail({
 }) {
   const jam = data.jamaah.filter((j) => j.groupId === g.id);
   const prog = groupProgress(g);
+  const fin = groupFinance(g, data);
   const depN = daysUntil(g.departDate);
   const cdCls =
     depN === null
@@ -5186,6 +6162,27 @@ function GroupDetail({
         <div className={"countdown lg " + cdCls}>
           {countdownLabel(g.departDate)}
         </div>
+      </div>
+      <div className="grid-3">
+        <StatCard
+          icon={ArrowDownLeft}
+          tone="green"
+          label="Uang Masuk Rombongan"
+          value={rupiah(fin.income)}
+          foot={fin.count + " transaksi terkait"}
+        />
+        <StatCard
+          icon={ArrowUpRight}
+          tone="red"
+          label="Uang Keluar Rombongan"
+          value={rupiah(fin.expense)}
+        />
+        <StatCard
+          icon={TrendingUp}
+          tone={fin.profit >= 0 ? "emerald" : "red"}
+          label="Profit Rombongan"
+          value={rupiah(fin.profit)}
+        />
       </div>
       <div className="card">
         <div className="card-head">
@@ -5586,7 +6583,7 @@ function Pelayanan({ data, setSelGroup, setView, setService }) {
 /* ============================================================
    VIEW: JAMAAH (database)
    ============================================================ */
-function JamaahView({ data, setJamaahModal, delJamaah }) {
+function JamaahView({ data, setJamaahModal, delJamaah, setBulkJamaahModal }) {
   const [q, setQ] = useState("");
   const [grp, setGrp] = useState("ALL");
   const gById = Object.fromEntries(data.groups.map((g) => [g.id, g]));
@@ -5662,6 +6659,9 @@ function JamaahView({ data, setJamaahModal, delJamaah }) {
           ))}
         </select>
         <div className="grow" />
+        <button className="btn btn-out" onClick={() => setBulkJamaahModal({})}>
+          <Plus size={16} /> Import Massal
+        </button>
         <button className="btn btn-primary" onClick={() => setJamaahModal({})}>
           <Plus size={16} /> Tambah Jamaah
         </button>
@@ -5766,7 +6766,15 @@ function JamaahView({ data, setJamaahModal, delJamaah }) {
 }
 
 /* ── FORM: ROMBONGAN ── */
-function GroupForm({ init, onClose, onSave }) {
+function GroupForm({
+  init,
+  data,
+  onClose,
+  onSave,
+  onAddCategory,
+  onAddContact,
+}) {
+  const defaultAccountId = defaultGroupAccount(data);
   const [f, setF] = useState({
     name: "",
     packageType: "Umroh",
@@ -5775,13 +6783,41 @@ function GroupForm({ init, onClose, onSave }) {
     driveLink: "",
     notes: "",
     ...init,
-    needed: Array.isArray(init.needed)
-      ? init.needed
-      : SERVICES.map((s) => s.id),
+    needed: normalizeNeededServices(init.needed),
     departDate: init.departDate ? fmtDateInput(init.departDate) : "",
     returnDate: init.returnDate ? fmtDateInput(init.returnDate) : "",
+    txDate: fmtDateInput(new Date()),
+    txAccountId: defaultAccountId,
+    txMethod: "Transfer",
+    incomeAmount: 0,
+    incomeCategoryId: defaultIncomeCategory(data),
+    incomeContactId: "",
+    incomeReference: "",
+    incomeDescription: "",
+    expenseAmount: 0,
+    expenseCategoryId: defaultExpenseCategory(data),
+    expenseContactId: "",
+    expenseReference: "",
+    expenseDescription: "",
+    adminAmount: 0,
+    adminCategoryId: "",
+    adminDescription: "",
   });
   const set = (k, v) => setF((s) => ({ ...s, [k]: v }));
+  const incomeCats = data.categories.filter((c) => c.kind === "income");
+  const expenseCats = data.categories.filter((c) => c.kind === "expense");
+  const selectedAcc = data.accounts.find((a) => a.id === f.txAccountId);
+  const incomePreview = Math.round(Number(f.incomeAmount) || 0);
+  const expensePreview =
+    Math.round(Number(f.expenseAmount) || 0) +
+    Math.round(Number(f.adminAmount) || 0);
+  const profitPreview = incomePreview - expensePreview;
+  const packageTypeOptions = Array.from(
+    new Set([
+      ...PACKAGE_TYPES,
+      ...(data.groups || []).map((g) => g.packageType).filter(Boolean),
+    ])
+  );
   return (
     <Modal
       title={init.id ? "Edit Rombongan" : "Rombongan Baru"}
@@ -5798,17 +6834,20 @@ function GroupForm({ init, onClose, onSave }) {
           />
         </Field>
         <Field label="Jenis Paket">
-          <select
+          <input
             className="input"
+            list="package-type-options"
             value={f.packageType}
             onChange={(e) => set("packageType", e.target.value)}
-          >
-            {PACKAGE_TYPES.map((t) => (
+            placeholder="Umroh / Haji / Tour / jenis baru"
+          />
+          <datalist id="package-type-options">
+            {packageTypeOptions.map((t) => (
               <option key={t} value={t}>
                 {t}
               </option>
             ))}
-          </select>
+          </datalist>
         </Field>
       </div>
       <div className="grid-2">
@@ -5903,6 +6942,253 @@ function GroupForm({ init, onClose, onSave }) {
           onChange={(e) => set("notes", e.target.value)}
         />
       </Field>
+      <div className="card group-tx-box">
+        <div className="card-head">
+          <div>
+            <h3>Transaksi Rombongan</h3>
+            <p className="muted sm">
+              Opsional. Isi kalau kamu juga ingin langsung mencatat uang masuk
+              dan uang keluar untuk rombongan ini.
+            </p>
+          </div>
+        </div>
+        <div className="grid-3">
+          <Field label="Tanggal Transaksi">
+            <input
+              type="date"
+              className="input"
+              value={f.txDate}
+              onChange={(e) => set("txDate", e.target.value)}
+            />
+          </Field>
+          <Field label="Rekening">
+            <select
+              className="input"
+              value={f.txAccountId}
+              onChange={(e) => set("txAccountId", e.target.value)}
+            >
+              {data.accounts.map((a) => (
+                <option key={a.id} value={a.id}>
+                  {a.name} ({OWN[a.ownership]?.short || a.ownership})
+                </option>
+              ))}
+            </select>
+          </Field>
+          <Field label="Metode">
+            <input
+              className="input"
+              value={f.txMethod}
+              onChange={(e) => set("txMethod", e.target.value)}
+              placeholder="Transfer / Cash / QRIS"
+            />
+          </Field>
+        </div>
+        <div className="info-good">
+          <Receipt size={14} />
+          Transaksi otomatis masuk ke menu Transaksi dan terhubung ke rombongan
+          ini. Sumber dana mengikuti rekening:{" "}
+          {selectedAcc ? OWN[selectedAcc.ownership]?.label : "Belum dipilih"}.
+        </div>
+        <div className="grid-2">
+          <div className="tx-mini-panel income-panel">
+            <h4>
+              <ArrowDownLeft size={15} /> Transaksi Masuk
+            </h4>
+            <Field label="Nominal Masuk">
+              <CurrencyInput
+                value={f.incomeAmount}
+                onChange={(v) => set("incomeAmount", v)}
+                placeholder="0"
+              />
+            </Field>
+            <Field label="Kategori Masuk">
+              <SelectAdd
+                value={f.incomeCategoryId}
+                onChange={(v) => set("incomeCategoryId", v)}
+                placeholder="Tanpa kategori"
+                addLabel="kategori masuk"
+                options={incomeCats.map((c) => ({
+                  value: c.id,
+                  label: c.name,
+                }))}
+                onCreate={(name) => {
+                  const c = {
+                    id: uid("cat"),
+                    name,
+                    kind: "income",
+                  };
+                  onAddCategory(c);
+                  return c.id;
+                }}
+              />
+            </Field>
+            <Field label="Dari Siapa">
+              <SelectAdd
+                value={f.incomeContactId}
+                onChange={(v) => set("incomeContactId", v)}
+                placeholder="- opsional -"
+                addLabel="customer"
+                options={data.contacts.map((c) => ({
+                  value: c.id,
+                  label: c.name,
+                }))}
+                onCreate={(name) => {
+                  const c = {
+                    id: uid("ct"),
+                    name,
+                    role: "CUSTOMER",
+                    phone: "",
+                  };
+                  onAddContact(c);
+                  return c.id;
+                }}
+              />
+            </Field>
+            <Field label="Referensi Masuk">
+              <input
+                className="input mono"
+                value={f.incomeReference}
+                onChange={(e) => set("incomeReference", e.target.value)}
+                placeholder="No. mutasi / invoice"
+              />
+            </Field>
+            <Field label="Deskripsi Masuk">
+              <input
+                className="input"
+                value={f.incomeDescription}
+                onChange={(e) => set("incomeDescription", e.target.value)}
+                placeholder="Kosongkan untuk otomatis"
+              />
+            </Field>
+          </div>
+          <div className="tx-mini-panel expense-panel">
+            <h4>
+              <ArrowUpRight size={15} /> Transaksi Keluar
+            </h4>
+            <Field label="Nominal Keluar Real">
+              <CurrencyInput
+                value={f.expenseAmount}
+                onChange={(v) => set("expenseAmount", v)}
+                placeholder="0"
+              />
+            </Field>
+            <Field label="Biaya Admin">
+              <CurrencyInput
+                value={f.adminAmount}
+                onChange={(v) => {
+                  const n = Number(v) || 0;
+                  setF((s) => ({
+                    ...s,
+                    adminAmount: v,
+                    adminCategoryId:
+                      n > 0
+                        ? s.adminCategoryId || defaultAdminCategory(data)
+                        : "",
+                  }));
+                }}
+                placeholder="0"
+              />
+            </Field>
+            <Field label="Kategori Keluar Real">
+              <select
+                className="input"
+                value={f.expenseCategoryId}
+                onChange={(e) => set("expenseCategoryId", e.target.value)}
+              >
+                <option value="">Tanpa kategori</option>
+                {expenseCats.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.name}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <Field label="Kategori Biaya Admin">
+              <select
+                className="input"
+                value={f.adminCategoryId}
+                onChange={(e) => set("adminCategoryId", e.target.value)}
+                disabled={!Number(f.adminAmount)}
+              >
+                <option value="">
+                  {Number(f.adminAmount)
+                    ? "Tanpa kategori"
+                    : "Kosong - isi biaya admin dulu"}
+                </option>
+                {expenseCats.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.name}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <Field label="Untuk Siapa">
+              <SelectAdd
+                value={f.expenseContactId}
+                onChange={(v) => set("expenseContactId", v)}
+                placeholder="- opsional -"
+                addLabel="vendor"
+                options={data.contacts.map((c) => ({
+                  value: c.id,
+                  label: c.name,
+                }))}
+                onCreate={(name) => {
+                  const c = {
+                    id: uid("ct"),
+                    name,
+                    role: "VENDOR",
+                    phone: "",
+                  };
+                  onAddContact(c);
+                  return c.id;
+                }}
+              />
+            </Field>
+            <Field label="Referensi Keluar">
+              <input
+                className="input mono"
+                value={f.expenseReference}
+                onChange={(e) => set("expenseReference", e.target.value)}
+                placeholder="No. mutasi / invoice"
+              />
+            </Field>
+            <Field label="Deskripsi Keluar Real">
+              <input
+                className="input"
+                value={f.expenseDescription}
+                onChange={(e) => set("expenseDescription", e.target.value)}
+                placeholder="Kosongkan untuk otomatis"
+              />
+            </Field>
+            <Field label="Deskripsi Biaya Admin">
+              <input
+                className="input"
+                value={f.adminDescription}
+                onChange={(e) => set("adminDescription", e.target.value)}
+                placeholder="Kosongkan untuk otomatis"
+              />
+            </Field>
+          </div>
+        </div>
+        <div className="group-profit-preview">
+          <span>
+            Masuk <b className="amt-income mono">{rupiah(incomePreview)}</b>
+          </span>
+          <span>
+            Keluar <b className="amt-expense mono">{rupiah(expensePreview)}</b>
+          </span>
+          <span>
+            Estimasi Profit{" "}
+            <b
+              className={
+                (profitPreview >= 0 ? "amt-income" : "amt-expense") + " mono"
+              }
+            >
+              {rupiah(profitPreview)}
+            </b>
+          </span>
+        </div>
+      </div>
       <div className="modal-foot">
         <div className="grow" />
         <button className="btn btn-ghost" onClick={onClose}>
@@ -5927,6 +7213,24 @@ function GroupForm({ init, onClose, onSave }) {
                 ? new Date(f.returnDate).toISOString()
                 : null,
               services: init.services,
+              __txDraft: {
+                date: f.txDate,
+                accountId: f.txAccountId,
+                method: f.txMethod,
+                incomeAmount: f.incomeAmount,
+                incomeCategoryId: f.incomeCategoryId,
+                incomeContactId: f.incomeContactId,
+                incomeReference: f.incomeReference,
+                incomeDescription: f.incomeDescription,
+                expenseAmount: f.expenseAmount,
+                expenseCategoryId: f.expenseCategoryId,
+                expenseContactId: f.expenseContactId,
+                expenseReference: f.expenseReference,
+                expenseDescription: f.expenseDescription,
+                adminAmount: f.adminAmount,
+                adminCategoryId: f.adminCategoryId,
+                adminDescription: f.adminDescription,
+              },
             });
           }}
         >
@@ -5937,7 +7241,64 @@ function GroupForm({ init, onClose, onSave }) {
   );
 }
 
-/* ── FORM: JAMAAH ── */
+/* ── FORM: JAMAAH (AI Vision via Edge Function "read-doc") ── */
+/* helper bersama: baca file (gambar dikompres, PDF dikirim apa adanya) */
+const docFileToPayload = (file) =>
+  new Promise((resolve, reject) => {
+    if (file.type === "application/pdf" || /\.pdf$/i.test(file.name || "")) {
+      const reader = new FileReader();
+      reader.onload = () =>
+        resolve({
+          image: String(reader.result).split(",")[1],
+          mediaType: "application/pdf",
+        });
+      reader.onerror = () => reject(new Error("Gagal membaca PDF."));
+      reader.readAsDataURL(file);
+      return;
+    }
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      let { width, height } = img;
+      const maxDim = 1600;
+      const scale = Math.min(1, maxDim / Math.max(width, height));
+      width = Math.round(width * scale);
+      height = Math.round(height * scale);
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      canvas.getContext("2d").drawImage(img, 0, 0, width, height);
+      const dataUrl = canvas.toDataURL("image/jpeg", 0.85);
+      resolve({ image: dataUrl.split(",")[1], mediaType: "image/jpeg" });
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error("Gagal memuat gambar."));
+    };
+    img.src = url;
+  });
+
+/* helper bersama: bersihkan hasil AI */
+const coerceDocResult = (doc) => {
+  const out = { ...(doc || {}) };
+  if (out.gender !== "L" && out.gender !== "P") delete out.gender;
+  [
+    "birthDate",
+    "passportExpiry",
+    "passportIssueDate",
+    "visaIssueDate",
+    "visaExpiry",
+  ].forEach((k) => {
+    if (out[k] && !/^\d{4}-\d{2}-\d{2}$/.test(out[k])) delete out[k];
+  });
+  Object.keys(out).forEach((k) => {
+    if (!String(out[k] ?? "").trim()) delete out[k];
+  });
+  return out;
+};
+
+/* ── FORM: JAMAAH (AI Vision via Edge Function "read-doc") ── */
 function JamaahForm({ init, data, onClose, onSave }) {
   const [f, setF] = useState({
     name: "",
@@ -5950,19 +7311,145 @@ function JamaahForm({ init, data, onClose, onSave }) {
     groupId: "",
     paymentStatus: "Belum",
     notes: "",
+    nationality: "",
+    passportIssuePlace: "",
+    ktpRtRw: "",
+    ktpKelDesa: "",
+    ktpKecamatan: "",
+    ktpReligion: "",
+    ktpMaritalStatus: "",
+    ktpOccupation: "",
+    ktpValidUntil: "",
+    visaNo: "",
+    visaType: "",
+    visaSponsor: "",
     ...init,
     passportExpiry: init.passportExpiry
       ? fmtDateInput(init.passportExpiry)
       : "",
     birthDate: init.birthDate ? fmtDateInput(init.birthDate) : "",
+    passportIssueDate: init.passportIssueDate
+      ? fmtDateInput(init.passportIssueDate)
+      : "",
+    visaIssueDate: init.visaIssueDate ? fmtDateInput(init.visaIssueDate) : "",
+    visaExpiry: init.visaExpiry ? fmtDateInput(init.visaExpiry) : "",
   });
+  const [aiBusy, setAiBusy] = useState(false);
+  const [aiStatus, setAiStatus] = useState("");
   const set = (k, v) => setF((s) => ({ ...s, [k]: v }));
+
+  const LABELS = { passport: "Paspor", ktp: "KTP", visa: "Visa" };
+
+  const applyDoc = (doc) => {
+    setF((s) => {
+      const next = { ...s };
+      Object.entries(doc || {}).forEach(([k, v]) => {
+        if (!String(v ?? "").trim()) return;
+        if (k === "gender") {
+          next[k] = v;
+          return;
+        }
+        const cur = next[k];
+        if (!String(cur ?? "").trim()) next[k] = v;
+      });
+      return next;
+    });
+  };
+
+  const readDoc = async (file, kind) => {
+    if (!file) return;
+    setAiBusy(true);
+    setAiStatus(`Membaca ${LABELS[kind]} dengan AI…`);
+    try {
+      const { image, mediaType } = await docFileToPayload(file);
+      const { data: res, error } = await supabase.functions.invoke("read-doc", {
+        body: { image, mediaType, kind },
+      });
+      if (error) throw error;
+      if (res?.error) throw new Error(res.error);
+      const parsed = coerceDocResult(res?.doc || {});
+      applyDoc(parsed);
+      const filled = Object.values(parsed).filter((v) =>
+        String(v).trim()
+      ).length;
+      setAiStatus(
+        filled
+          ? `${LABELS[kind]} terbaca. ${filled} kolom terisi otomatis. Kolom yang sudah ada tidak ditimpa — mohon cek ulang sebelum simpan.`
+          : `${LABELS[kind]} terbaca, tapi AI tidak yakin. Coba file lebih jelas/terang.`
+      );
+    } catch (err) {
+      setAiStatus(
+        err?.message ||
+          "Gagal membaca dokumen. Cek koneksi internet lalu coba lagi."
+      );
+    } finally {
+      setAiBusy(false);
+    }
+  };
+
   return (
     <Modal
       title={init.id ? "Edit Jamaah" : "Jamaah Baru"}
       onClose={onClose}
       wide
     >
+      <div className="doc-upload-box">
+        <div className="doc-upload-head">
+          <div>
+            <b>Isi Otomatis dari Dokumen (AI)</b>
+            <span>
+              Opsional. Upload Paspor, KTP, dan/atau Visa (foto atau PDF) — form
+              terisi otomatis, sisanya tinggal lengkapi manual.
+            </span>
+          </div>
+        </div>
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))",
+            gap: 12,
+          }}
+        >
+          <Field label="Upload Paspor">
+            <input
+              type="file"
+              accept="image/*,application/pdf"
+              className="input"
+              disabled={aiBusy}
+              onChange={(e) => readDoc(e.target.files?.[0], "passport")}
+            />
+          </Field>
+          <Field label="Upload KTP">
+            <input
+              type="file"
+              accept="image/*,application/pdf"
+              className="input"
+              disabled={aiBusy}
+              onChange={(e) => readDoc(e.target.files?.[0], "ktp")}
+            />
+          </Field>
+          <Field label="Upload Visa">
+            <input
+              type="file"
+              accept="image/*,application/pdf"
+              className="input"
+              disabled={aiBusy}
+              onChange={(e) => readDoc(e.target.files?.[0], "visa")}
+            />
+          </Field>
+        </div>
+        {aiStatus ? (
+          <div className={aiBusy ? "ai-status busy" : "ai-status"}>
+            {aiStatus}
+          </div>
+        ) : (
+          <div className="ai-hint">
+            Foto lurus/terang atau PDF asli memberi hasil paling akurat. Data
+            hasil AI tetap wajib dicek sebelum disimpan.
+          </div>
+        )}
+      </div>
+
       <div className="grid-2">
         <Field label="Nama Lengkap (sesuai paspor)">
           <input
@@ -6039,6 +7526,135 @@ function JamaahForm({ init, data, onClose, onSave }) {
           onChange={(e) => set("address", e.target.value)}
         />
       </Field>
+
+      <div className="info-gold">
+        <Stamp size={14} /> Data Visa (Arab Saudi)
+      </div>
+      <div className="grid-2">
+        <Field label="No. Visa">
+          <input
+            className="input mono"
+            value={f.visaNo}
+            onChange={(e) => set("visaNo", e.target.value)}
+          />
+        </Field>
+        <Field label="Jenis Visa">
+          <input
+            className="input"
+            value={f.visaType}
+            onChange={(e) => set("visaType", e.target.value)}
+            placeholder="cth: Umrah / Hajj"
+          />
+        </Field>
+      </div>
+      <div className="grid-2">
+        <Field label="Tanggal Terbit Visa">
+          <input
+            type="date"
+            className="input"
+            value={f.visaIssueDate}
+            onChange={(e) => set("visaIssueDate", e.target.value)}
+          />
+        </Field>
+        <Field label="Masa Berlaku Visa">
+          <input
+            type="date"
+            className="input"
+            value={f.visaExpiry}
+            onChange={(e) => set("visaExpiry", e.target.value)}
+          />
+        </Field>
+      </div>
+      <Field label="Sponsor / Muassasah (opsional)">
+        <input
+          className="input"
+          value={f.visaSponsor}
+          onChange={(e) => set("visaSponsor", e.target.value)}
+        />
+      </Field>
+
+      <div className="grid-2">
+        <Field label="Kewarganegaraan">
+          <input
+            className="input"
+            value={f.nationality}
+            onChange={(e) => set("nationality", e.target.value)}
+          />
+        </Field>
+        <Field label="Kantor Penerbit Paspor">
+          <input
+            className="input"
+            value={f.passportIssuePlace}
+            onChange={(e) => set("passportIssuePlace", e.target.value)}
+          />
+        </Field>
+      </div>
+      <div className="grid-2">
+        <Field label="Tanggal Terbit Paspor">
+          <input
+            type="date"
+            className="input"
+            value={f.passportIssueDate}
+            onChange={(e) => set("passportIssueDate", e.target.value)}
+          />
+        </Field>
+        <Field label="Berlaku KTP">
+          <input
+            className="input"
+            value={f.ktpValidUntil}
+            onChange={(e) => set("ktpValidUntil", e.target.value)}
+            placeholder="Contoh: SEUMUR HIDUP"
+          />
+        </Field>
+      </div>
+      <div className="grid-2">
+        <Field label="Agama">
+          <input
+            className="input"
+            value={f.ktpReligion}
+            onChange={(e) => set("ktpReligion", e.target.value)}
+          />
+        </Field>
+        <Field label="Status Perkawinan">
+          <input
+            className="input"
+            value={f.ktpMaritalStatus}
+            onChange={(e) => set("ktpMaritalStatus", e.target.value)}
+          />
+        </Field>
+      </div>
+      <div className="grid-2">
+        <Field label="Pekerjaan">
+          <input
+            className="input"
+            value={f.ktpOccupation}
+            onChange={(e) => set("ktpOccupation", e.target.value)}
+          />
+        </Field>
+        <Field label="RT/RW">
+          <input
+            className="input"
+            value={f.ktpRtRw}
+            onChange={(e) => set("ktpRtRw", e.target.value)}
+          />
+        </Field>
+      </div>
+      <div className="grid-2">
+        <Field label="Kel/Desa">
+          <input
+            className="input"
+            value={f.ktpKelDesa}
+            onChange={(e) => set("ktpKelDesa", e.target.value)}
+          />
+        </Field>
+        <Field label="Kecamatan">
+          <input
+            className="input"
+            value={f.ktpKecamatan}
+            onChange={(e) => set("ktpKecamatan", e.target.value)}
+          />
+        </Field>
+      </div>
       <div className="grid-2">
         <Field label="Rombongan">
           <select
@@ -6075,6 +7691,7 @@ function JamaahForm({ init, data, onClose, onSave }) {
           onChange={(e) => set("notes", e.target.value)}
         />
       </Field>
+
       <div className="modal-foot">
         <div className="grow" />
         <button className="btn btn-ghost" onClick={onClose}>
@@ -6096,11 +7713,32 @@ function JamaahForm({ init, data, onClose, onSave }) {
               groupId: f.groupId,
               paymentStatus: f.paymentStatus,
               notes: f.notes,
+              nationality: f.nationality,
+              passportIssuePlace: f.passportIssuePlace,
+              ktpRtRw: f.ktpRtRw,
+              ktpKelDesa: f.ktpKelDesa,
+              ktpKecamatan: f.ktpKecamatan,
+              ktpReligion: f.ktpReligion,
+              ktpMaritalStatus: f.ktpMaritalStatus,
+              ktpOccupation: f.ktpOccupation,
+              ktpValidUntil: f.ktpValidUntil,
+              visaNo: f.visaNo,
+              visaType: f.visaType,
+              visaSponsor: f.visaSponsor,
               passportExpiry: f.passportExpiry
                 ? new Date(f.passportExpiry).toISOString()
                 : null,
               birthDate: f.birthDate
                 ? new Date(f.birthDate).toISOString()
+                : null,
+              passportIssueDate: f.passportIssueDate
+                ? new Date(f.passportIssueDate).toISOString()
+                : null,
+              visaIssueDate: f.visaIssueDate
+                ? new Date(f.visaIssueDate).toISOString()
+                : null,
+              visaExpiry: f.visaExpiry
+                ? new Date(f.visaExpiry).toISOString()
                 : null,
             });
           }}
@@ -6112,9 +7750,540 @@ function JamaahForm({ init, data, onClose, onSave }) {
   );
 }
 
+/* ── IMPORT MASSAL JAMAAH (banyak paspor sekaligus) ── */
+function BulkJamaahImport({ init, data, onClose, onImport }) {
+  const [groupId, setGroupId] = useState(init?.groupId || "");
+  const [paymentStatus, setPaymentStatus] = useState("Belum");
+  const [rows, setRows] = useState([]);
+  const [busy, setBusy] = useState(false);
+
+  const setRow = (id, patch) =>
+    setRows((rs) => rs.map((x) => (x.id === id ? { ...x, ...patch } : x)));
+  const setField = (id, key, val) =>
+    setRows((rs) =>
+      rs.map((x) => (x.id === id ? { ...x, doc: { ...x.doc, [key]: val } } : x))
+    );
+  const removeRow = (id) => setRows((rs) => rs.filter((x) => x.id !== id));
+
+  const onFiles = async (fileList) => {
+    const files = Array.from(fileList || []);
+    if (!files.length) return;
+    const fresh = files.map((file) => ({
+      id: uid("bulk"),
+      fileName: file.name,
+      file,
+      status: "queue",
+      doc: {},
+      error: "",
+    }));
+    setRows((rs) => [...rs, ...fresh]);
+    setBusy(true);
+    for (const r of fresh) {
+      setRow(r.id, { status: "reading" });
+      try {
+        const { image, mediaType } = await docFileToPayload(r.file);
+        const { data: res, error } = await supabase.functions.invoke(
+          "read-doc",
+          { body: { image, mediaType, kind: "passport" } }
+        );
+        if (error) throw error;
+        if (res?.error) throw new Error(res.error);
+        const parsed = coerceDocResult(res?.doc || {});
+        setRow(r.id, { status: "done", doc: parsed });
+      } catch (err) {
+        setRow(r.id, { status: "error", error: err?.message || "Gagal" });
+      }
+    }
+    setBusy(false);
+  };
+
+  const ready = rows.filter((r) => r.status === "done" || r.status === "error");
+  const valid = rows.filter((r) => String(r.doc?.name || "").trim());
+
+  const doImport = () => {
+    if (!valid.length)
+      return notify("Belum ada jamaah dengan nama untuk disimpan.");
+    const list = valid.map((r) => {
+      const d = r.doc;
+      return {
+        name: d.name || "",
+        gender: d.gender === "P" ? "P" : "L",
+        nik: d.nik || "",
+        passportNo: d.passportNo || "",
+        birthPlace: d.birthPlace || "",
+        phone: "",
+        address: "",
+        groupId: groupId || "",
+        paymentStatus,
+        notes: "",
+        nationality: d.nationality || "",
+        passportIssuePlace: d.passportIssuePlace || "",
+        passportExpiry: d.passportExpiry
+          ? new Date(d.passportExpiry).toISOString()
+          : null,
+        birthDate: d.birthDate ? new Date(d.birthDate).toISOString() : null,
+        passportIssueDate: d.passportIssueDate
+          ? new Date(d.passportIssueDate).toISOString()
+          : null,
+      };
+    });
+    onImport(list);
+  };
+
+  return (
+    <Modal title="Import Massal Jamaah" onClose={onClose} wide>
+      <div className="info-good">
+        <Users size={14} /> Upload banyak <b>paspor</b> sekaligus (foto/PDF). 1
+        file = 1 jamaah. KTP & visa bisa dilengkapi nanti lewat tombol Edit.
+      </div>
+      <div className="grid-2">
+        <Field label="Masukkan ke Rombongan">
+          <select
+            className="input"
+            value={groupId}
+            onChange={(e) => setGroupId(e.target.value)}
+          >
+            <option value="">— belum ditentukan —</option>
+            {data.groups.map((g) => (
+              <option key={g.id} value={g.id}>
+                {g.name}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Field label="Status Pembayaran (semua)">
+          <select
+            className="input"
+            value={paymentStatus}
+            onChange={(e) => setPaymentStatus(e.target.value)}
+          >
+            {PAY_STATUS.map((s) => (
+              <option key={s} value={s}>
+                {s}
+              </option>
+            ))}
+          </select>
+        </Field>
+      </div>
+      <Field label="Pilih banyak file paspor (bisa pilih sekaligus)">
+        <input
+          type="file"
+          accept="image/*,application/pdf"
+          multiple
+          className="input"
+          disabled={busy}
+          onChange={(e) => onFiles(e.target.files)}
+        />
+      </Field>
+      {rows.length > 0 && (
+        <div className="imp-summary">
+          <span>
+            <b>{rows.length}</b> file
+          </span>
+          <span className="dot-sep">·</span>
+          <span className="st st-paid">{ready.length} selesai dibaca</span>
+          {busy && <span className="st st-part">membaca…</span>}
+        </div>
+      )}
+      {rows.length > 0 && (
+        <div className="imp-table-wrap">
+          <table className="table imp-table">
+            <thead>
+              <tr>
+                <th>File</th>
+                <th>Nama</th>
+                <th>No Paspor</th>
+                <th>L/P</th>
+                <th>Status</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={r.id}>
+                  <td className="sm">{r.fileName}</td>
+                  <td>
+                    <input
+                      className="input"
+                      value={r.doc?.name || ""}
+                      placeholder={
+                        r.status === "reading" ? "membaca…" : "(kosong)"
+                      }
+                      onChange={(e) => setField(r.id, "name", e.target.value)}
+                    />
+                  </td>
+                  <td>
+                    <input
+                      className="input mono"
+                      value={r.doc?.passportNo || ""}
+                      onChange={(e) =>
+                        setField(r.id, "passportNo", e.target.value)
+                      }
+                    />
+                  </td>
+                  <td>
+                    <select
+                      className="input"
+                      value={r.doc?.gender === "P" ? "P" : "L"}
+                      onChange={(e) => setField(r.id, "gender", e.target.value)}
+                    >
+                      <option value="L">L</option>
+                      <option value="P">P</option>
+                    </select>
+                  </td>
+                  <td className="sm">
+                    {r.status === "reading" && (
+                      <span className="st st-part">Membaca…</span>
+                    )}
+                    {r.status === "queue" && (
+                      <span className="st st-unpaid">Antre</span>
+                    )}
+                    {r.status === "done" && (
+                      <span className="st st-paid">OK</span>
+                    )}
+                    {r.status === "error" && (
+                      <span className="st st-over" title={r.error}>
+                        Gagal
+                      </span>
+                    )}
+                  </td>
+                  <td>
+                    <button
+                      className="icon-btn sm danger"
+                      onClick={() => removeRow(r.id)}
+                    >
+                      <Trash2 size={13} />
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      <div className="modal-foot">
+        <div className="grow" />
+        <button className="btn btn-ghost" onClick={onClose}>
+          Batal
+        </button>
+        <button
+          className="btn btn-primary"
+          disabled={busy || !valid.length}
+          onClick={doImport}
+        >
+          Simpan {valid.length} Jamaah
+        </button>
+      </div>
+    </Modal>
+  );
+}
 /* ============================================================
    IMPORT MUTASI BANK (BSI .xls/.xlsx, CSV)
    ============================================================ */
+/* ── FORM: TRANSAKSI MASUK + KELUAR (sepasang, profit langsung terlihat) ── */
+function DealForm({
+  init,
+  data,
+  onClose,
+  onSave,
+  onAddContact,
+  onAddCategory,
+}) {
+  const defAcc = defaultGroupAccount(data);
+  const [f, setF] = useState({
+    label: "",
+    date: fmtDateInput(new Date()),
+    method: "Transfer",
+    inAmount: 0,
+    inAccountId: defAcc,
+    inCategoryId: defaultIncomeCategory(data),
+    inContactId: "",
+    inDesc: "",
+    outAmount: 0,
+    outAccountId: defAcc,
+    outCategoryId: defaultExpenseCategory(data),
+    outContactId: "",
+    outDesc: "",
+    adminAmount: 0,
+    adminCategoryId: defaultAdminCategory(data),
+    adminDesc: "",
+    ...init,
+  });
+  const set = (k, v) => setF((s) => ({ ...s, [k]: v }));
+  const incomeCats = data.categories.filter((c) => c.kind === "income");
+  const expenseCats = data.categories.filter((c) => c.kind === "expense");
+  const inAmt = Math.round(Number(f.inAmount) || 0);
+  const outAmt = Math.round(Number(f.outAmount) || 0);
+  const adminAmt = Math.round(Number(f.adminAmount) || 0);
+  const profit = inAmt - outAmt - adminAmt;
+
+  return (
+    <Modal
+      title="Transaksi Masuk + Keluar"
+      sub="Catat uang masuk & keluar sekaligus — profit langsung kelihatan"
+      onClose={onClose}
+      wide
+    >
+      <div className="grid-3">
+        <Field label="Tanggal">
+          <input
+            type="date"
+            className="input"
+            value={f.date}
+            onChange={(e) => set("date", e.target.value)}
+          />
+        </Field>
+        <Field label="Metode">
+          <input
+            className="input"
+            value={f.method}
+            onChange={(e) => set("method", e.target.value)}
+            placeholder="Transfer / Cash / QRIS"
+          />
+        </Field>
+        <Field label="Nama Transaksi (opsional)">
+          <input
+            className="input"
+            value={f.label}
+            onChange={(e) => set("label", e.target.value)}
+            placeholder="cth: Jual tiket Pak Budi"
+          />
+        </Field>
+      </div>
+      <div className="grid-2">
+        <div className="tx-mini-panel income-panel">
+          <h4>
+            <ArrowDownLeft size={15} /> Uang Masuk
+          </h4>
+          <Field label="Nominal Masuk">
+            <CurrencyInput
+              value={f.inAmount}
+              onChange={(v) => set("inAmount", v)}
+            />
+          </Field>
+          <Field label="Diterima di Rekening">
+            <select
+              className="input"
+              value={f.inAccountId}
+              onChange={(e) => set("inAccountId", e.target.value)}
+            >
+              {data.accounts.map((a) => (
+                <option key={a.id} value={a.id}>
+                  {a.name} ({OWN[a.ownership]?.short})
+                </option>
+              ))}
+            </select>
+          </Field>
+          <Field label="Kategori Masuk">
+            <SelectAdd
+              value={f.inCategoryId}
+              onChange={(v) => set("inCategoryId", v)}
+              placeholder="Tanpa kategori"
+              addLabel="kategori masuk"
+              options={incomeCats.map((c) => ({ value: c.id, label: c.name }))}
+              onCreate={(name) => {
+                const c = { id: uid("cat"), name, kind: "income" };
+                onAddCategory(c);
+                return c.id;
+              }}
+            />
+          </Field>
+          <Field label="Diterima dari">
+            <SelectAdd
+              value={f.inContactId}
+              onChange={(v) => set("inContactId", v)}
+              placeholder="- opsional -"
+              addLabel="customer"
+              options={data.contacts.map((c) => ({
+                value: c.id,
+                label: c.name,
+              }))}
+              onCreate={(name) => {
+                const c = { id: uid("ct"), name, role: "CUSTOMER", phone: "" };
+                onAddContact(c);
+                return c.id;
+              }}
+            />
+          </Field>
+          <Field label="Deskripsi Masuk">
+            <input
+              className="input"
+              value={f.inDesc}
+              onChange={(e) => set("inDesc", e.target.value)}
+              placeholder="Kosongkan untuk otomatis"
+            />
+          </Field>
+        </div>
+        <div className="tx-mini-panel expense-panel">
+          <h4>
+            <ArrowUpRight size={15} /> Uang Keluar
+          </h4>
+          <Field label="Nominal Keluar">
+            <CurrencyInput
+              value={f.outAmount}
+              onChange={(v) => set("outAmount", v)}
+            />
+          </Field>
+          <Field label="Dibayar dari Rekening">
+            <select
+              className="input"
+              value={f.outAccountId}
+              onChange={(e) => set("outAccountId", e.target.value)}
+            >
+              {data.accounts.map((a) => (
+                <option key={a.id} value={a.id}>
+                  {a.name} ({OWN[a.ownership]?.short})
+                </option>
+              ))}
+            </select>
+          </Field>
+          <Field label="Kategori Keluar">
+            <SelectAdd
+              value={f.outCategoryId}
+              onChange={(v) => set("outCategoryId", v)}
+              placeholder="Tanpa kategori"
+              addLabel="kategori keluar"
+              options={expenseCats.map((c) => ({ value: c.id, label: c.name }))}
+              onCreate={(name) => {
+                const c = { id: uid("cat"), name, kind: "expense" };
+                onAddCategory(c);
+                return c.id;
+              }}
+            />
+          </Field>
+          <Field label="Dibayar ke">
+            <SelectAdd
+              value={f.outContactId}
+              onChange={(v) => set("outContactId", v)}
+              placeholder="- opsional -"
+              addLabel="vendor"
+              options={data.contacts.map((c) => ({
+                value: c.id,
+                label: c.name,
+              }))}
+              onCreate={(name) => {
+                const c = { id: uid("ct"), name, role: "VENDOR", phone: "" };
+                onAddContact(c);
+                return c.id;
+              }}
+            />
+          </Field>
+          <Field label="Deskripsi Keluar">
+            <input
+              className="input"
+              value={f.outDesc}
+              onChange={(e) => set("outDesc", e.target.value)}
+              placeholder="Kosongkan untuk otomatis"
+            />
+          </Field>
+          <div
+            style={{
+              marginTop: 8,
+              paddingTop: 10,
+              borderTop: "1px dashed var(--line)",
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+              fontSize: 11.5,
+              fontWeight: 700,
+              color: "#a87f29",
+              textTransform: "uppercase",
+              letterSpacing: ".04em",
+            }}
+          >
+            <Receipt size={13} /> Biaya Admin (tercatat terpisah)
+          </div>
+          <Field label="Nominal Admin">
+            <CurrencyInput
+              value={f.adminAmount}
+              onChange={(v) => set("adminAmount", v)}
+            />
+          </Field>
+          <Field label="Kategori Admin">
+            <SelectAdd
+              value={f.adminCategoryId}
+              onChange={(v) => set("adminCategoryId", v)}
+              placeholder="Tanpa kategori"
+              addLabel="kategori admin"
+              options={expenseCats.map((c) => ({ value: c.id, label: c.name }))}
+              onCreate={(name) => {
+                const c = { id: uid("cat"), name, kind: "expense" };
+                onAddCategory(c);
+                return c.id;
+              }}
+            />
+          </Field>
+          <Field label="Deskripsi Admin">
+            <input
+              className="input"
+              value={f.adminDesc}
+              onChange={(e) => set("adminDesc", e.target.value)}
+              placeholder="cth: Biaya transfer bank"
+            />
+          </Field>
+        </div>
+      </div>
+      <div className="group-profit-preview">
+        <span>
+          Masuk <b className="amt-income mono">{rupiah(inAmt)}</b>
+        </span>
+        <span>
+          Keluar <b className="amt-expense mono">{rupiah(outAmt)}</b>
+        </span>
+        <span>
+          Admin <b className="amt-expense mono">{rupiah(adminAmt)}</b>
+        </span>
+        <span>
+          Profit{" "}
+          <b className={(profit >= 0 ? "amt-income" : "amt-expense") + " mono"}>
+            {rupiah(profit)}
+          </b>
+        </span>
+      </div>
+      <div className="modal-foot">
+        <div className="grow" />
+        <button className="btn btn-ghost" onClick={onClose}>
+          Batal
+        </button>
+        <button
+          className="btn btn-primary"
+          onClick={() => {
+            if (inAmt <= 0 && outAmt <= 0 && adminAmt <= 0)
+              return notify("Isi minimal salah satu nominal.");
+            onSave({
+              label: f.label,
+              date: f.date,
+              method: f.method,
+              in: {
+                amount: inAmt,
+                accountId: f.inAccountId,
+                categoryId: f.inCategoryId,
+                contactId: f.inContactId,
+                description: f.inDesc,
+              },
+              out: {
+                amount: outAmt,
+                accountId: f.outAccountId,
+                categoryId: f.outCategoryId,
+                contactId: f.outContactId,
+                description: f.outDesc,
+              },
+              admin: {
+                amount: adminAmt,
+                accountId: f.outAccountId,
+                categoryId: f.adminCategoryId,
+                contactId: f.outContactId,
+                description: f.adminDesc,
+              },
+            });
+          }}
+        >
+          Simpan
+        </button>
+      </div>
+    </Modal>
+  );
+}
 function ImportMutasi({ data, onClose, onImport }) {
   const [step, setStep] = useState(1);
   const bsiDefault = data.accounts.find((a) =>
@@ -6731,6 +8900,8 @@ function TxForm({
     receivableId: init.receivableId || "",
     payableId: init.payableId || "",
     refundOfTxId: init.refundOfTxId || "",
+    adminAmount: 0,
+    adminCategoryId: defaultAdminCategory(data),
   });
   const set = (k, v) => setF((s) => ({ ...s, [k]: v }));
   const onAccount = (id) => {
@@ -6762,9 +8933,12 @@ function TxForm({
       notify("Rekening asal dan tujuan tidak boleh sama.");
       return;
     }
+    const adminAmount = Math.round(Number(f.adminAmount) || 0);
+    const baseId =
+      init.id || (type === "expense" && adminAmount > 0 ? uid("tx") : null);
     const t = {
       ...init,
-      id: init.id,
+      id: baseId || init.id,
       type,
       date: new Date(f.date).toISOString(),
       amount: Number(f.amount),
@@ -6783,6 +8957,33 @@ function TxForm({
       refundOfTxId:
         type === "transfer" || !f.refundOfTxId ? null : f.refundOfTxId,
     };
+    if (!init.id && type === "expense" && adminAmount > 0) {
+      onSave([
+        t,
+        {
+          id: uid("tx"),
+          type: "expense",
+          date: t.date,
+          amount: adminAmount,
+          accountId: f.accountId,
+          ownership: f.ownership,
+          categoryId: f.adminCategoryId || defaultAdminCategory(data),
+          contactId: f.contactId || null,
+          productId: null,
+          toAccountId: null,
+          fee: 0,
+          method: f.method,
+          reference: f.reference,
+          description:
+            "Biaya admin" + (f.description ? " - " + f.description : ""),
+          receivableId: null,
+          payableId: null,
+          refundOfTxId: null,
+          adminOfTxId: baseId,
+        },
+      ]);
+      return;
+    }
     onSave(t);
   };
 
@@ -6901,6 +9102,57 @@ function TxForm({
               akan muncul di laman "Dana di Rek Pribadi" untuk dipindahkan ke
               PT.
             </div>
+          )}
+          {type === "expense" && !init.id && (
+            <>
+              <div className="grid-2">
+                <Field
+                  label="Biaya Admin (opsional)"
+                  hint="Nominal utama tetap pokok pengeluaran. Biaya admin akan dibuat sebagai transaksi keluar terpisah."
+                >
+                  <CurrencyInput
+                    value={f.adminAmount}
+                    onChange={(v) =>
+                      setF((s) => ({
+                        ...s,
+                        adminAmount: v,
+                        adminCategoryId:
+                          Number(v) > 0
+                            ? s.adminCategoryId || defaultAdminCategory(data)
+                            : s.adminCategoryId,
+                      }))
+                    }
+                  />
+                </Field>
+                <Field label="Kategori Biaya Admin">
+                  <SelectAdd
+                    value={f.adminCategoryId}
+                    onChange={(v) => set("adminCategoryId", v)}
+                    placeholder="Biaya Bank"
+                    addLabel="kategori admin"
+                    options={data.categories
+                      .filter((c) => c.kind === "expense")
+                      .map((c) => ({ value: c.id, label: c.name }))}
+                    onCreate={(name) => {
+                      const c = {
+                        id: uid("cat"),
+                        name,
+                        kind: "expense",
+                      };
+                      onAddCategory(c);
+                      return c.id;
+                    }}
+                  />
+                </Field>
+              </div>
+              {Number(f.adminAmount) > 0 && (
+                <div className="info-good">
+                  <Receipt size={14} /> Saat disimpan akan dibuat 2 baris:
+                  pengeluaran pokok {rupiah(Number(f.amount) || 0)} dan biaya
+                  admin {rupiah(Number(f.adminAmount) || 0)}.
+                </div>
+              )}
+            </>
           )}
           <div className="grid-2">
             <Field label="Kategori">
@@ -8131,6 +10383,30 @@ tr.clickable:hover{background:#faf8f2}
 .sync-saved{background:rgba(31,157,107,.13);color:var(--green)}
 .sync-error{background:rgba(192,73,47,.13);color:var(--red)}
 
+/* document AI */
+.doc-upload-box{border:1px solid var(--line);background:linear-gradient(135deg,#fff,#faf8f2);border-radius:12px;padding:14px;margin-bottom:16px}
+.doc-upload-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:12px}
+.doc-upload-head b{display:block;font-size:14px;color:var(--ink)}
+.doc-upload-head span{display:block;margin-top:3px;font-size:12px;color:var(--muted)}
+.ai-status,.ai-hint{font-size:12px;border-radius:9px;padding:9px 10px;margin-top:10px}
+.ai-status{background:rgba(31,157,107,.1);color:var(--green);font-weight:650}
+.ai-status.busy{background:rgba(199,154,62,.15);color:#a87f29}
+.ai-hint{background:#f5f2ea;color:var(--muted)}
+
+/* undo */
+.undo-wrap{position:relative}
+.undo-main:disabled{opacity:.48;cursor:not-allowed;transform:none!important;box-shadow:none}
+.undo-count{display:inline-grid;place-items:center;min-width:18px;height:18px;padding:0 5px;border-radius:999px;background:rgba(17,112,79,.12);color:var(--emerald);font-size:10.5px;font-weight:800}
+.undo-menu{position:absolute;right:0;top:calc(100% + 8px);width:310px;max-width:calc(100vw - 32px);background:#fff;border:1px solid var(--line);border-radius:12px;box-shadow:0 18px 45px rgba(20,30,25,.18);padding:12px;z-index:40}
+.undo-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;padding-bottom:10px;border-bottom:1px solid var(--line);font-size:13px}
+.undo-head span{display:block;color:var(--muted);font-size:11.5px;margin-top:2px}
+.undo-primary{width:100%;display:flex;align-items:center;justify-content:center;gap:7px;border:none;background:var(--emerald);color:#fff;border-radius:9px;padding:9px 10px;font:inherit;font-size:12.5px;font-weight:700;cursor:pointer;margin-top:10px}
+.undo-list{display:flex;flex-direction:column;gap:6px;max-height:230px;overflow:auto;margin-top:10px}
+.undo-item{display:flex;align-items:center;justify-content:space-between;gap:10px;text-align:left;border:1px solid var(--line);background:#faf8f2;border-radius:9px;padding:9px 10px;cursor:pointer;color:var(--ink)}
+.undo-item:hover{border-color:#cfc7b3;background:#fff}
+.undo-item span{font-size:12.5px;font-weight:650;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.undo-item small{font-size:11px;color:var(--muted);white-space:nowrap}
+
 /* buttons */
 .btn{display:inline-flex;align-items:center;gap:7px;padding:9px 15px;border-radius:10px;border:1px solid transparent;font:inherit;font-size:13px;font-weight:600;cursor:pointer;transition:.15s;white-space:nowrap}
 .btn:active{transform:translateY(1px)}
@@ -8311,6 +10587,15 @@ tr.clickable:hover{background:#faf8f2}
 .gc-meta{display:flex;flex-direction:column;gap:5px;font-size:12.5px;color:#5a5648}
 .gc-meta span{display:inline-flex;align-items:center;gap:6px}
 .gc-meta svg{color:var(--muted);flex-shrink:0}
+.group-money{display:grid;grid-template-columns:1fr;gap:5px;background:#faf8f2;border:1px solid var(--line);border-radius:10px;padding:10px 11px;font-size:12px;color:var(--muted)}
+.group-money span{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.group-tx-box{background:#fffdf8;border-color:#ecd9a6}
+.tx-mini-panel{border:1px solid var(--line);border-radius:12px;padding:14px;background:#fff;display:flex;flex-direction:column;gap:10px}
+.tx-mini-panel h4{display:flex;align-items:center;gap:7px;margin:0 0 2px;font-size:14px}
+.income-panel{border-top:3px solid var(--green)}
+.expense-panel{border-top:3px solid var(--red)}
+.group-profit-preview{display:flex;align-items:center;gap:10px;flex-wrap:wrap;background:#faf8f2;border:1px solid var(--line);border-radius:10px;padding:11px 13px;margin-top:14px;font-size:12.5px;color:var(--muted)}
+.group-profit-preview span{display:inline-flex;align-items:center;gap:6px}
 .gc-prog{display:flex;align-items:center;gap:10px}
 .prog-track{flex:1;height:8px;background:#ece7da;border-radius:5px;overflow:hidden}
 .prog-fill{height:100%;background:linear-gradient(90deg,var(--emerald),var(--emerald-br));border-radius:5px;transition:width .4s}
