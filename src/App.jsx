@@ -491,6 +491,10 @@ const groupFinance = (g, data) => {
     count: tx.length,
   };
 };
+const groupTx = (g, data) =>
+  [...(data?.tx || []).filter((t) => t.groupId === g.id)].sort(
+    (a, b) => new Date(b.date || 0) - new Date(a.date || 0)
+  );
 const pickFirst = (items, test) => (items || []).find(test)?.id || "";
 const defaultGroupAccount = (data) =>
   pickFirst(data?.accounts, (a) => a.ownership === "COMPANY") ||
@@ -2709,6 +2713,7 @@ function FinanceApp({ session }) {
                 setService,
                 setJamaahModal,
                 delJamaah,
+                setTxModal,
               }}
             />
           )}
@@ -5840,6 +5845,7 @@ function Keberangkatan({
   setService,
   setJamaahModal,
   delJamaah,
+  setTxModal,
 }) {
   if (selGroup) {
     const g = data.groups.find((x) => x.id === selGroup);
@@ -5867,6 +5873,7 @@ function Keberangkatan({
           setService,
           setJamaahModal,
           delJamaah,
+          setTxModal,
         }}
       />
     );
@@ -5960,6 +5967,7 @@ function Keberangkatan({
               data={data}
               clash={clashIds.has(g.id)}
               onOpen={() => setSelGroup(g.id)}
+              onFinance={() => setSelGroup(g.id)}
               onEdit={() => setGroupModal(g)}
               onDelete={() => {
                 if (
@@ -5979,7 +5987,7 @@ function Keberangkatan({
   );
 }
 
-function GroupCard({ g, data, clash, onOpen, onEdit, onDelete }) {
+function GroupCard({ g, data, clash, onOpen, onFinance, onEdit, onDelete }) {
   const prog = groupProgress(g);
   const jcount = data.jamaah.filter((j) => j.groupId === g.id).length;
   const alerts = groupAlerts(g);
@@ -6073,6 +6081,9 @@ function GroupCard({ g, data, clash, onOpen, onEdit, onDelete }) {
         <button className="btn btn-xs btn-primary" onClick={onOpen}>
           Kelola Layanan
         </button>
+        <button className="btn btn-xs btn-out" onClick={onFinance}>
+          <Receipt size={13} /> Keuangan
+        </button>
         <button className="btn btn-xs btn-out" onClick={onEdit}>
           <Pencil size={13} />
         </button>
@@ -6092,8 +6103,10 @@ function GroupDetail({
   setService,
   setJamaahModal,
   delJamaah,
+  setTxModal,
 }) {
   const jam = data.jamaah.filter((j) => j.groupId === g.id);
+  const tx = groupTx(g, data);
   const prog = groupProgress(g);
   const fin = groupFinance(g, data);
   const depN = daysUntil(g.departDate);
@@ -6183,6 +6196,77 @@ function GroupDetail({
           label="Profit Rombongan"
           value={rupiah(fin.profit)}
         />
+      </div>
+      <div className="card">
+        <div className="card-head">
+          <h3>Transaksi Rombongan</h3>
+          <span className="muted sm mono">
+            Masuk {rupiah(fin.income)} Â· Keluar {rupiah(fin.expense)} Â· Profit{" "}
+            {rupiah(fin.profit)}
+          </span>
+        </div>
+        {tx.length === 0 ? (
+          <Empty text="Belum ada transaksi yang dihubungkan ke rombongan ini. Buka transaksi lalu isi kolom rombongan / paket terkait." />
+        ) : (
+          <div className="table-wrap">
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>Tanggal</th>
+                  <th>Tipe</th>
+                  <th>Deskripsi</th>
+                  <th>Nominal</th>
+                  <th>Rekening</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {tx.map((t) => (
+                  <tr key={t.id}>
+                    <td className="nowrap mono sm">{fmtDate(t.date)}</td>
+                    <td>
+                      <TypePill type={t.type} refund={isRefundTx(t)} />
+                    </td>
+                    <td>
+                      {t.description || <span className="muted">â€”</span>}
+                      {t.dealId && (
+                        <div className="muted xs refund-ref">
+                          <Receipt size={11} /> Terkait paket / rombongan
+                        </div>
+                      )}
+                      {t.refundOfTxId && (
+                        <div className="muted xs refund-ref">
+                          <Repeat size={11} /> Koreksi transaksi lama
+                        </div>
+                      )}
+                    </td>
+                    <td className={"r mono nowrap amt-" + t.type}>
+                      {t.type === "expense"
+                        ? "âˆ’"
+                        : t.type === "income"
+                        ? "+"
+                        : ""}
+                      {rupiah(t.amount)}
+                    </td>
+                    <td className="sm">
+                      {data.accounts.find((a) => a.id === t.accountId)?.name ||
+                        "â€”"}
+                    </td>
+                    <td className="actions">
+                      <button
+                        className="icon-btn sm"
+                        onClick={() => setTxModal(t)}
+                        title="Edit transaksi"
+                      >
+                        <Pencil size={13} />
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
       <div className="card">
         <div className="card-head">
