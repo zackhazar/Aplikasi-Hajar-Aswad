@@ -492,7 +492,7 @@ const groupFinance = (g, data) => {
   };
 };
 const groupTx = (g, data) =>
-  [...(data?.tx || []).filter((t) => t.groupId === g.id)].sort(
+  [...((data?.tx || []).filter((t) => t.groupId === g.id))].sort(
     (a, b) => new Date(b.date || 0) - new Date(a.date || 0)
   );
 const pickFirst = (items, test) => (items || []).find(test)?.id || "";
