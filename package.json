@@ -1,4 +1,5 @@
 {
+  
   "name": "react-typescript",
   "version": "1.0.0",
   "description": "React and TypeScript example starter project",
@@ -19,7 +20,8 @@
     "react-scripts": "5.0.1",
     "recharts": "3.8.1",
     "recharts-scale": "0.4.5",
-    "xlsx": "^0.18.5"
+    "xlsx": "^0.18.5",
+    "pdfjs-dist": "3.11.174"
   },
   "devDependencies": {
     "@types/react": "18.2.38",

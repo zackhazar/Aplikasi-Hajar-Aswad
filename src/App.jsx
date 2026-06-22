@@ -492,7 +492,7 @@ const groupFinance = (g, data) => {
   };
 };
 const groupTx = (g, data) =>
-  [...((data?.tx || []).filter((t) => t.groupId === g.id))].sort(
+  [...(data?.tx || []).filter((t) => t.groupId === g.id)].sort(
     (a, b) => new Date(b.date || 0) - new Date(a.date || 0)
   );
 const pickFirst = (items, test) => (items || []).find(test)?.id || "";
@@ -3222,7 +3222,7 @@ function Dashboard({
                   </td>
                   <td className={"r mono nowrap amt-" + t.type}>
                     {t.type === "expense"
-                      ? "−"
+                      ? "-"
                       : t.type === "income"
                       ? "+"
                       : ""}
@@ -3561,7 +3561,7 @@ function Transaksi({
                   </td>
                   <td className={"r mono nowrap amt-" + t.type}>
                     {t.type === "expense"
-                      ? "−"
+                      ? "-"
                       : t.type === "income"
                       ? "+"
                       : ""}
@@ -3832,7 +3832,7 @@ function DanaPribadi({ data, metrics, accById, ctById, setTxModal }) {
                     {t.toAccountId ? ` → ${accById[t.toAccountId]?.name}` : ""}
                   </td>
                   <td className={"r mono nowrap amt-" + t.type}>
-                    {t.type === "expense" || t.type === "transfer" ? "−" : "+"}
+                    {t.type === "expense" || t.type === "transfer" ? "-" : "+"}
                     {rupiah(t.amount)}
                   </td>
                 </tr>
@@ -6201,8 +6201,8 @@ function GroupDetail({
         <div className="card-head">
           <h3>Transaksi Rombongan</h3>
           <span className="muted sm mono">
-            Masuk {rupiah(fin.income)} Â· Keluar {rupiah(fin.expense)} Â· Profit{" "}
-            {rupiah(fin.profit)}
+            Masuk {rupiah(fin.income)} Keluar {rupiah(fin.expense)}
+            Profit {rupiah(fin.profit)}
           </span>
         </div>
         {tx.length === 0 ? (
@@ -6228,7 +6228,7 @@ function GroupDetail({
                       <TypePill type={t.type} refund={isRefundTx(t)} />
                     </td>
                     <td>
-                      {t.description || <span className="muted">â€”</span>}
+                      {t.description || <span className="muted">"-"</span>}
                       {t.dealId && (
                         <div className="muted xs refund-ref">
                           <Receipt size={11} /> Terkait paket / rombongan
@@ -6242,7 +6242,7 @@ function GroupDetail({
                     </td>
                     <td className={"r mono nowrap amt-" + t.type}>
                       {t.type === "expense"
-                        ? "âˆ’"
+                        ? "-"
                         : t.type === "income"
                         ? "+"
                         : ""}
@@ -6250,7 +6250,7 @@ function GroupDetail({
                     </td>
                     <td className="sm">
                       {data.accounts.find((a) => a.id === t.accountId)?.name ||
-                        "â€”"}
+                        "-"}
                     </td>
                     <td className="actions">
                       <button
@@ -8386,12 +8386,22 @@ function ImportMutasi({ data, onClose, onImport }) {
 
   const parseAmt = (s) => {
     if (s == null) return 0;
-    if (typeof s === "number") return Math.abs(s);
-    const t = String(s)
-      .replace(/[^0-9.,-]/g, "")
-      .replace(/-/g, "")
-      .replace(/,/g, "");
-    const n = parseFloat(t);
+
+    if (typeof s === "number") {
+      return Math.abs(s);
+    }
+
+    let t = String(s).trim();
+
+    // format Indonesia
+    if (/Rp/i.test(t) || /\.\d{3}/.test(t)) {
+      t = t.replace(/[^0-9.-]/g, "").replace(/\./g, "");
+    } else {
+      t = t.replace(/[^0-9.,-]/g, "").replace(/,/g, "");
+    }
+
+    const n = Number(t);
+
     return isNaN(n) ? 0 : Math.abs(n);
   };
   const parseDate = (s) => {
@@ -8403,6 +8413,68 @@ function ImportMutasi({ data, onClose, onImport }) {
     const m = t.match(/(\d{1,2})[-\/](\d{1,2})[-\/](\d{4})/);
     if (!m) return null;
     return new Date(+m[3], +m[2] - 1, +m[1], 12).toISOString();
+  };
+  const parsePdfToRows = async (bytes) => {
+    const pdfjs = await import("pdfjs-dist/legacy/build/pdf");
+    if (pdfjs.GlobalWorkerOptions && !pdfjs.GlobalWorkerOptions.workerSrc) {
+      pdfjs.GlobalWorkerOptions.workerSrc =
+        "https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.worker.min.js";
+    }
+    const pdf = await pdfjs.getDocument({ data: bytes }).promise;
+    const out = [];
+    for (let p = 1; p <= pdf.numPages; p++) {
+      const page = await pdf.getPage(p);
+      const text = await page.getTextContent();
+      const items = (text.items || [])
+        .map((it) => ({
+          str: String(it.str || "")
+            .replace(/\s+/g, " ")
+            .trim(),
+          x: Number(it.transform?.[4] || 0),
+          y: Number(it.transform?.[5] || 0),
+          w: Number(it.width || 0),
+        }))
+        .filter((it) => it.str);
+
+      items.sort((a, b) => {
+        if (Math.abs(b.y - a.y) > 2) return b.y - a.y;
+        return a.x - b.x;
+      });
+
+      const lineGroups = [];
+      items.forEach((it) => {
+        const last = lineGroups[lineGroups.length - 1];
+        if (!last || Math.abs(last.y - it.y) > 2.5) {
+          lineGroups.push({ y: it.y, items: [it] });
+        } else {
+          last.items.push(it);
+        }
+      });
+
+      lineGroups.forEach((line) => {
+        const sorted = [...line.items].sort((a, b) => a.x - b.x);
+        const cells = [];
+        let cell = null;
+        sorted.forEach((it) => {
+          if (!cell) {
+            cell = { text: it.str, endX: it.x + it.w };
+            return;
+          }
+          const gap = it.x - cell.endX;
+          if (gap > 18) {
+            cells.push(cell.text.trim());
+            cell = { text: it.str, endX: it.x + it.w };
+          } else {
+            cell.text += (/[/-]$/.test(cell.text) ? "" : " ") + it.str;
+            cell.endX = Math.max(cell.endX, it.x + it.w);
+          }
+        });
+        if (cell) cells.push(cell.text.trim());
+        const clean = cells.filter(Boolean);
+        if (clean.length) out.push(clean);
+      });
+    }
+    return out;
   };
   const suggestCat = (desc, hint, type) => {
     const s = (desc + " " + hint).toLowerCase();
@@ -8432,6 +8504,7 @@ function ImportMutasi({ data, onClose, onImport }) {
         .trim()
         .toLowerCase();
       let aoa = [];
+      let isGopayPdf = false;
 
       // CSV path (simple, no dependency)
       if (file.name.endsWith(".csv")) {
@@ -8463,6 +8536,15 @@ function ImportMutasi({ data, onClose, onImport }) {
           )
         );
       }
+
+      // PDF path (export PDF yang masih berisi teks tabel)
+      else if (file.name.endsWith(".pdf") || file.type === "application/pdf") {
+        aoa = await parsePdfToRows(bytes);
+
+        isGopayPdf =
+          aoa.some((r) => r.join(" ").toLowerCase().includes("gopay saldo")) ||
+          aoa.some((r) => r.join(" ").toLowerCase().includes("cashback"));
+      }
       // XLSX path (needs SheetJS)
       else {
         const XLSX = await import("xlsx");
@@ -8474,7 +8556,50 @@ function ImportMutasi({ data, onClose, onImport }) {
           defval: "",
         });
       }
+      if (isGopayPdf) {
+        console.log("GO PAY PDF DETECTED");
 
+        const out = [];
+
+        for (let i = 0; i < aoa.length; i++) {
+          const row = aoa[i].join(" ");
+
+          const mDate = row.match(/(\d{2}\/\d{2}\/\d{4})/);
+
+          if (!mDate) continue;
+
+          const dt = mDate[1].split("/").reverse().join("-");
+
+          const amountMatch = row.match(/-?Rp\s?[\d.]+/);
+
+          if (!amountMatch) continue;
+
+          const amount = parseAmt(amountMatch[0]);
+
+          const type = amountMatch[0].includes("-") ? "expense" : "income";
+
+          out.push({
+            date: dt,
+            type,
+            amount: Math.abs(amount),
+            description: row,
+            reference: "",
+            party: "",
+            hint: "GoPay PDF",
+            importKey: dt + "|" + amount + "|" + i,
+            categoryId: null,
+            include: true,
+            dup: false,
+          });
+        }
+
+        if (out.length) {
+          setRows(out);
+          setStep(2);
+          setBusy(false);
+          return;
+        }
+      }
       const hi = aoa.findIndex(
         (r) =>
           r.some((c) => /debet|nominal|tipe/i.test(c)) &&
@@ -8613,15 +8738,15 @@ function ImportMutasi({ data, onClose, onImport }) {
           </Field>
           <div className="imp-drop">
             <Download size={26} />
-            <p>Pilih file mutasi BSI (.xls / .xlsx / .csv)</p>
+            <p>Pilih file mutasi BSI / Gopay (.xls / .xlsx / .csv / .pdf)</p>
             <input
               type="file"
-              accept=".xls,.xlsx,.csv,application/vnd.ms-excel"
+              accept=".xls,.xlsx,.csv,.pdf,application/vnd.ms-excel,application/pdf"
               onChange={(e) => onFile(e.target.files[0])}
             />
             <span className="muted xs">
-              Format asli dari BSINet langsung bisa dibaca — tidak perlu
-              dirapikan.
+              Format asli BSINet, CSV, Excel, dan PDF teks bisa langsung dibaca.
+              Kalau PDF berupa scan/gambar penuh, biasanya masih perlu OCR/AI.
             </span>
           </div>
           {busy && <p className="muted sm">Membaca file…</p>}
@@ -9794,7 +9919,7 @@ function AsetEmas({
                     <td className="r mono sm">{rupiah(nilai)}</td>
                     <td className="r mono">
                       <b style={{ color: ug >= 0 ? "#1f9d6b" : "#c0492f" }}>
-                        {ug >= 0 ? "+" : "−"}
+                        {ug >= 0 ? "+" : "-"}
                         {rupiah(Math.abs(ug))}
                       </b>
                     </td>
@@ -9866,7 +9991,7 @@ function AsetEmas({
                         <td className="r mono sm">{rupiah(nilai)}</td>
                         <td className="r mono">
                           <b style={{ color: ug >= 0 ? "#1f9d6b" : "#c0492f" }}>
-                            {ug >= 0 ? "+" : "−"}
+                            {ug >= 0 ? "+" : "-"}
                             {rupiah(Math.abs(ug))}
                           </b>
                         </td>
