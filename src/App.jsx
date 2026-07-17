@@ -192,32 +192,37 @@ const printInvoicePdf = ({ invoice, receivable, contact, product, company }) => 
   );
   const itemName =
     product?.name || receivable.description || "Tagihan layanan perjalanan";
+  const bankName = company?.bankName || "BSI";
+  const bankAccount = company?.bankAccount || "-";
+  const bankOwner = company?.bankOwner || company?.name || "PT Hajar Aswad Barokah";
   const html = `<!doctype html>
 <html>
 <head>
   <meta charset="utf-8" />
   <title>${escHtml(invoice.number || "Invoice")}</title>
   <style>
-    @page{size:A4;margin:16mm}
+    @page{size:A4;margin:0}
     *{box-sizing:border-box}
-    body{font-family:Arial,Helvetica,sans-serif;color:#1f2a24;margin:0;background:#f6f3ea}
-    .sheet{width:210mm;min-height:297mm;margin:0 auto;background:#fff;padding:18mm;position:relative}
-    .top{display:flex;justify-content:space-between;gap:24px;border-bottom:3px solid #11704f;padding-bottom:18px}
-    .brand h1{margin:0;font-size:23px;color:#11704f}
-    .brand p,.meta p,.bill p{margin:4px 0;color:#6d6556;font-size:12px}
-    .badge{display:inline-block;background:#11704f;color:#fff;border-radius:6px;padding:7px 11px;font-weight:700;font-size:12px;letter-spacing:.05em}
-    .title{font-size:34px;margin:24px 0 8px;color:#1f2a24}
-    .grid{display:grid;grid-template-columns:1fr 1fr;gap:24px;margin:18px 0}
-    .box{border:1px solid #e5ddca;border-radius:8px;padding:14px}
-    .label{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:#8a7b62;font-weight:700;margin-bottom:8px}
-    table{width:100%;border-collapse:collapse;margin-top:18px}
-    th{background:#11704f;color:#fff;text-align:left;font-size:12px;padding:10px}
-    td{border-bottom:1px solid #eee7d8;padding:12px 10px;font-size:13px;vertical-align:top}
+    body{font-family:Arial,Helvetica,sans-serif;color:#202520;margin:0;background:#fff}
+    .sheet{width:210mm;min-height:297mm;margin:0 auto;background:#fff;padding:18mm 19mm 16mm;position:relative}
+    .top{display:flex;justify-content:space-between;gap:30px;border-bottom:1px solid #c5a24b;padding-bottom:15px}
+    .brand{display:flex;gap:12px;align-items:flex-start}.logo{width:42px;height:42px;object-fit:contain}
+    .brand h1{margin:0;font-size:18px;letter-spacing:.08em;color:#202520;text-transform:uppercase}
+    .brand p,.meta p,.bill p,.payment p{margin:4px 0;color:#62675e;font-size:11px;line-height:1.45}
+    .meta{text-align:right}.meta .kind{font-size:29px;letter-spacing:.22em;font-weight:300;color:#202520;margin:0 0 8px}
+    .badge{display:inline-block;background:#c5a24b;color:#fff;padding:5px 9px;font-weight:700;font-size:10px;letter-spacing:.08em}
+    .title{font-size:11px;margin:22px 0 10px;color:#9a7a2d;letter-spacing:.16em;text-transform:uppercase}
+    .grid{display:grid;grid-template-columns:1.15fr .85fr;gap:18px;margin:0 0 24px}
+    .box{border-top:2px solid #202520;background:#faf9f5;padding:13px 14px;min-height:90px}
+    .label{font-size:10px;text-transform:uppercase;letter-spacing:.13em;color:#9a7a2d;font-weight:700;margin-bottom:8px}
+    .bill h3{margin:0 0 5px;font-size:15px}.bill p{white-space:pre-line}
+    table{width:100%;border-collapse:collapse;margin-top:4px}
+    th{background:#202520;color:#fff;text-align:left;font-size:10px;letter-spacing:.08em;text-transform:uppercase;padding:11px 10px}
+    td{border-bottom:1px solid #deded8;padding:13px 10px;font-size:12px;vertical-align:top}
     .r{text-align:right}.mono{font-variant-numeric:tabular-nums}
-    .sum{margin-left:auto;width:310px;margin-top:18px}
-    .sum div{display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid #eee7d8;font-size:13px}
-    .sum .grand{font-size:18px;font-weight:800;color:#11704f;border-bottom:3px double #11704f}
-    .note{position:absolute;left:18mm;right:18mm;bottom:18mm;border-top:1px solid #e5ddca;padding-top:12px;color:#6d6556;font-size:12px;line-height:1.5}
+    .sum{margin-left:auto;width:300px;margin-top:19px}.sum div{display:flex;justify-content:space-between;padding:7px 0;border-bottom:1px solid #deded8;font-size:12px}.sum .grand{font-size:17px;font-weight:800;color:#9a7a2d;border-bottom:2px solid #c5a24b;padding-top:11px}
+    .lower{display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-top:28px}.payment{border-top:1px solid #c5a24b;padding-top:12px}.signature{text-align:center;padding-top:34px}.signature .line{width:150px;border-top:1px solid #202520;margin:40px auto 8px}.signature p{margin:0;font-size:11px}
+    .note{position:absolute;left:19mm;right:19mm;bottom:12mm;border-top:1px solid #deded8;padding-top:9px;color:#777b72;font-size:10px;line-height:1.5}
     @media print{body{background:#fff}.sheet{width:auto;min-height:auto;margin:0;padding:0}.note{position:fixed}}
   </style>
 </head>
@@ -225,27 +230,31 @@ const printInvoicePdf = ({ invoice, receivable, contact, product, company }) => 
   <main class="sheet">
     <section class="top">
       <div class="brand">
+        <img class="logo" src="${LOGO_GOLD}" alt="" />
+        <div>
         <h1>${escHtml(company?.name || "PT Hajar Aswad Barokah")}</h1>
         <p>${escHtml(company?.field || "Travel Umroh, Haji & Tour")}</p>
         <p>${escHtml(company?.owner ? "PIC: " + company.owner : "")}</p>
+        </div>
       </div>
       <div class="meta r">
+        <p class="kind">INVOICE</p>
         <span class="badge">${escHtml(invoice.status || invoiceStatus(receivable))}</span>
         <p><b>No:</b> ${escHtml(invoice.number)}</p>
         <p><b>Tanggal:</b> ${escHtml(fmtDate(invoice.date || new Date()))}</p>
         <p><b>Jatuh tempo:</b> ${escHtml(fmtDate(receivable.dueDate))}</p>
       </div>
     </section>
-    <h2 class="title">INVOICE</h2>
+    <h2 class="title">Data Pemesan</h2>
     <section class="grid">
       <div class="box bill">
-        <div class="label">Ditagihkan kepada</div>
+        <div class="label">Nama Jamaah / Pemesan</div>
         <h3 style="margin:0 0 6px">${escHtml(contact?.name || "-")}</h3>
         <p>${escHtml(contact?.phone || "")}</p>
         <p>${escHtml(contact?.address || "")}</p>
       </div>
       <div class="box bill">
-        <div class="label">Ringkasan</div>
+        <div class="label">Informasi Tagihan</div>
         <p>Total tagihan: <b>${rupiah(receivable.total)}</b></p>
         <p>Sudah dibayar: <b>${rupiah(receivable.paid)}</b></p>
         <p>Sisa tagihan: <b>${rupiah(rem)}</b></p>
@@ -264,6 +273,10 @@ const printInvoicePdf = ({ invoice, receivable, contact, product, company }) => 
       <div><span>Total</span><b>${rupiah(receivable.total)}</b></div>
       <div><span>Dibayar</span><b>${rupiah(receivable.paid)}</b></div>
       <div class="grand"><span>Sisa</span><span>${rupiah(rem)}</span></div>
+    </section>
+    <section class="lower">
+      <div class="payment"><div class="label">Informasi Pembayaran</div><p>Bank: <b>${escHtml(bankName)}</b></p><p>No. Rekening: <b>${escHtml(bankAccount)}</b></p><p>Atas Nama: <b>${escHtml(bankOwner)}</b></p></div>
+      <div class="signature"><p>Hormat kami,</p><div class="line"></div><p><b>${escHtml(company?.owner || "Pimpinan")}</b></p><p>${escHtml(company?.name || "PT Hajar Aswad Barokah")}</p></div>
     </section>
     <p class="note">Terima kasih atas kepercayaannya. Mohon cantumkan nomor invoice saat melakukan konfirmasi pembayaran.</p>
   </main>
