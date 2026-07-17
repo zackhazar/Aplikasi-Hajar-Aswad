@@ -1894,6 +1894,8 @@ function FinanceApp({ session }) {
       list = list.filter((t) => t.ownership === "PERSONAL_BUSINESS");
     else if (ownFilter === "BUSINESS")
       list = list.filter((t) => OWN[t.ownership]?.business);
+    else if (ownFilter === "PERSONAL")
+      list = list.filter((t) => t.ownership === "PERSONAL");
     return list;
   }, [data, ownFilter]);
 
@@ -2612,11 +2614,13 @@ function FinanceApp({ session }) {
               )}
             </div>
             <SyncBadge status={sync} />
-            <div className="seg">
+            <div className="seg" title="Pilih sumber transaksi yang tampil di dashboard dan daftar transaksi">
               {[
                 ["ALL", "Semua"],
+                ["BUSINESS", "Bisnis"],
                 ["PT", "PT"],
                 ["PB", "Pribadi-Bisnis"],
+                ["PERSONAL", "Pribadi"],
               ].map(([k, l]) => (
                 <button
                   key={k}
