@@ -532,6 +532,10 @@ function normalize(d) {
   d.tx = d.tx || [];
   d.receivables = d.receivables || [];
   d.payables = d.payables || [];
+  d.invoices = d.invoices || [];
+  d.auditLog = d.auditLog || [];
+  d.attachments = d.attachments || [];
+  d.installments = d.installments || [];
   d.groups = (d.groups || []).map((g) => ({
     ...g,
     needed: normalizeNeededServices(g.needed),
@@ -545,6 +549,24 @@ function normalize(d) {
     ...t,
     groupId: t.groupId || null,
     refundOfTxId: t.refundOfTxId || null,
+    attachmentIds: Array.isArray(t.attachmentIds) ? t.attachmentIds : [],
+  }));
+  d.receivables = (d.receivables || []).map((r) => ({
+    ...r,
+    invoiceId: r.invoiceId || null,
+    installmentPlanId: r.installmentPlanId || null,
+    reminder: r.reminder || { whatsapp: true, email: true, daysBefore: 3 },
+  }));
+  d.invoices = (d.invoices || []).map((inv) => ({
+    ...inv,
+    status: inv.status || "DRAFT",
+    installmentPlanId: inv.installmentPlanId || null,
+    attachmentIds: Array.isArray(inv.attachmentIds) ? inv.attachmentIds : [],
+  }));
+  d.auditLog = (d.auditLog || []).map((entry) => ({
+    ...entry,
+    before: entry.before || null,
+    after: entry.after || null,
   }));
   (d.categories || []).forEach((c) => {
     if (
@@ -2053,6 +2075,29 @@ function FinanceApp({ session }) {
     const before = structuredClone(data);
     const nd = structuredClone(data);
     fn(nd);
+    const actor = session?.user?.email || "lokal";
+    const changedAt = new Date().toISOString();
+    nd.auditLog = [
+      {
+        id: uid("audit"),
+        at: changedAt,
+        actor,
+        action: label,
+        before: {
+          tx: before.tx || [],
+          receivables: before.receivables || [],
+          invoices: before.invoices || [],
+          attachments: before.attachments || [],
+        },
+        after: {
+          tx: nd.tx || [],
+          receivables: nd.receivables || [],
+          invoices: nd.invoices || [],
+          attachments: nd.attachments || [],
+        },
+      },
+      ...(nd.auditLog || []),
+    ].slice(0, 500);
     rememberUndo(label, before);
     setData(nd);
   };
