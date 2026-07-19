@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
+import { createPortal } from "react-dom";
 import { createClient } from "@supabase/supabase-js";
 import {
   LayoutDashboard,
@@ -69,6 +70,7 @@ import {
   Area,
   AreaChart,
 } from "recharts";
+import InvoicePrint from "./components/InvoicePrint";
 
 /* ============================================================
    PT HAJAR ASWAD BAROKAH — Aplikasi Keuangan & Laporan
@@ -1771,6 +1773,7 @@ function FinanceApp({ session }) {
   const [groupModal, setGroupModal] = useState(null);
   const [jamaahModal, setJamaahModal] = useState(null);
   const [bulkJamaahModal, setBulkJamaahModal] = useState(null);
+  const [invoiceModal, setInvoiceModal] = useState(null);
   const [selGroup, setSelGroup] = useState(null);
 
   /* ---------- save queue (anti race-condition) ---------- */
@@ -2718,6 +2721,7 @@ function FinanceApp({ session }) {
                 setJamaahModal,
                 delJamaah,
                 setTxModal,
+                setInvoiceModal,
               }}
             />
           )}
@@ -2728,7 +2732,13 @@ function FinanceApp({ session }) {
           )}
           {view === "jamaah" && (
             <JamaahView
-              {...{ data, setJamaahModal, delJamaah, setBulkJamaahModal }}
+              {...{
+                data,
+                setJamaahModal,
+                delJamaah,
+                setBulkJamaahModal,
+                setInvoiceModal,
+              }}
             />
           )}
           {view === "pengaturan" && (
@@ -2873,6 +2883,13 @@ function FinanceApp({ session }) {
             setBulkJamaahModal(null);
             notify("Berhasil menambah " + list.length + " jamaah.");
           }}
+        />
+      )}
+      {invoiceModal && (
+        <InvoiceModal
+          jamaah={invoiceModal}
+          data={data}
+          onClose={() => setInvoiceModal(null)}
         />
       )}
       {catModal && (
@@ -5850,6 +5867,7 @@ function Keberangkatan({
   setJamaahModal,
   delJamaah,
   setTxModal,
+  setInvoiceModal,
 }) {
   if (selGroup) {
     const g = data.groups.find((x) => x.id === selGroup);
@@ -5878,6 +5896,7 @@ function Keberangkatan({
           setJamaahModal,
           delJamaah,
           setTxModal,
+          setInvoiceModal,
         }}
       />
     );
@@ -6108,6 +6127,7 @@ function GroupDetail({
   setJamaahModal,
   delJamaah,
   setTxModal,
+  setInvoiceModal,
 }) {
   const jam = data.jamaah.filter((j) => j.groupId === g.id);
   const tx = groupTx(g, data);
@@ -6376,6 +6396,13 @@ function GroupDetail({
                         </span>
                       </td>
                       <td className="actions">
+                        <button
+                          className="icon-btn sm"
+                          title="Cetak Invoice"
+                          onClick={() => setInvoiceModal(j)}
+                        >
+                          <Printer size={13} />
+                        </button>
                         <button
                           className="icon-btn sm"
                           onClick={() => setJamaahModal(j)}
@@ -6671,7 +6698,13 @@ function Pelayanan({ data, setSelGroup, setView, setService }) {
 /* ============================================================
    VIEW: JAMAAH (database)
    ============================================================ */
-function JamaahView({ data, setJamaahModal, delJamaah, setBulkJamaahModal }) {
+function JamaahView({
+  data,
+  setJamaahModal,
+  delJamaah,
+  setBulkJamaahModal,
+  setInvoiceModal,
+}) {
   const [q, setQ] = useState("");
   const [grp, setGrp] = useState("ALL");
   const gById = Object.fromEntries(data.groups.map((g) => [g.id, g]));
@@ -6822,6 +6855,13 @@ function JamaahView({ data, setJamaahModal, delJamaah, setBulkJamaahModal }) {
                     <td className="actions">
                       <button
                         className="icon-btn sm"
+                        title="Cetak Invoice"
+                        onClick={() => setInvoiceModal(j)}
+                      >
+                        <Printer size={14} />
+                      </button>
+                      <button
+                        className="icon-btn sm"
                         onClick={() => setJamaahModal(j)}
                       >
                         <Pencil size={14} />
@@ -6850,6 +6890,201 @@ function JamaahView({ data, setJamaahModal, delJamaah, setBulkJamaahModal }) {
         </div>
       </div>
     </div>
+  );
+}
+
+/* ── MODAL: CETAK INVOICE ── */
+function InvoiceModal({ jamaah, data, onClose, initSelected }) {
+  const group = data.groups.find((g) => g.id === jamaah.groupId);
+  const today = new Date();
+  const defNomor =
+    "INV-" +
+    String(today.getFullYear()).slice(-2) +
+    String(today.getMonth() + 1).padStart(2, "0") +
+    String(today.getDate()).padStart(2, "0") +
+    "-" +
+    String(jamaah.id || "").replace(/\D/g, "").slice(-4).padStart(4, "0");
+  const defPeriode = group
+    ? [group.departDate, group.returnDate]
+        .filter(Boolean)
+        .map((d) => fmtDate(d))
+        .join(" - ")
+    : "";
+  const defKuantitas = (group?.pax || 1) + " Pax";
+
+  const [nomor, setNomor] = useState(defNomor);
+  const [tanggal, setTanggal] = useState(fmtDateInput(today));
+  const [periode, setPeriode] = useState(defPeriode);
+  const [nama, setNama] = useState(jamaah.name || "");
+  const [telepon, setTelepon] = useState(jamaah.phone || "");
+  const [email, setEmail] = useState(jamaah.email || "");
+  const [items, setItems] = useState(
+    SERVICES.map((s) => ({
+      id: s.id,
+      label: s.label,
+      checked: !!(initSelected && initSelected[s.id] != null),
+      kuantitas: defKuantitas,
+      total: (initSelected && initSelected[s.id]) || 0,
+    }))
+  );
+  const setItem = (id, patch) =>
+    setItems((arr) => arr.map((it) => (it.id === id ? { ...it, ...patch } : it)));
+
+  const selected = items.filter((it) => it.checked);
+  const invData = {
+    customerName: nama,
+    periode,
+    telepon,
+    email,
+    nomor,
+    tanggal,
+    items: selected.map((it) => ({
+      deskripsi: it.label,
+      kuantitas: it.kuantitas,
+      total: it.total,
+    })),
+  };
+
+  return (
+    <Modal
+      title="Cetak Invoice"
+      sub={jamaah.name + (group ? " — " + group.name : "")}
+      onClose={onClose}
+      wide
+    >
+      <div className="no-print stack">
+        <div className="grid-3">
+          <Field label="Nama">
+            <input
+              className="input"
+              value={nama}
+              onChange={(e) => setNama(e.target.value)}
+            />
+          </Field>
+          <Field label="Telepon">
+            <input
+              className="input"
+              value={telepon}
+              onChange={(e) => setTelepon(e.target.value)}
+            />
+          </Field>
+          <Field label="Email">
+            <input
+              className="input"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+            />
+          </Field>
+          <Field label="Nomor Invoice">
+            <input
+              className="input"
+              value={nomor}
+              onChange={(e) => setNomor(e.target.value)}
+            />
+          </Field>
+          <Field label="Tanggal">
+            <input
+              type="date"
+              className="input"
+              value={tanggal}
+              onChange={(e) => setTanggal(e.target.value)}
+            />
+          </Field>
+          <Field label="Periode (opsional)">
+            <input
+              className="input"
+              value={periode}
+              onChange={(e) => setPeriode(e.target.value)}
+            />
+          </Field>
+        </div>
+        <Field label="Pilih Layanan">
+          <div className="table-wrap">
+            <table className="table">
+              <thead>
+                <tr>
+                  <th></th>
+                  <th>Layanan</th>
+                  <th>Kuantitas</th>
+                  <th>Total (Rp)</th>
+                </tr>
+              </thead>
+              <tbody>
+                {items.map((it) => (
+                  <tr key={it.id}>
+                    <td>
+                      <input
+                        type="checkbox"
+                        checked={it.checked}
+                        onChange={(e) =>
+                          setItem(it.id, { checked: e.target.checked })
+                        }
+                      />
+                    </td>
+                    <td>{it.label}</td>
+                    <td>
+                      <input
+                        className="input"
+                        style={{ maxWidth: 110 }}
+                        disabled={!it.checked}
+                        value={it.kuantitas}
+                        onChange={(e) =>
+                          setItem(it.id, { kuantitas: e.target.value })
+                        }
+                      />
+                    </td>
+                    <td>
+                      <input
+                        type="number"
+                        className="input"
+                        style={{ maxWidth: 160 }}
+                        disabled={!it.checked}
+                        value={it.total || ""}
+                        onChange={(e) =>
+                          setItem(it.id, { total: Number(e.target.value) || 0 })
+                        }
+                      />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Field>
+        <div className="modal-foot">
+          <button className="btn btn-out" onClick={onClose}>
+            Tutup
+          </button>
+          <button
+            className="btn btn-primary"
+            disabled={!selected.length}
+            onClick={() => window.print()}
+          >
+            <Printer size={16} /> Cetak Invoice
+          </button>
+        </div>
+      </div>
+      <div className="invoice-preview no-print">
+        <InvoicePrint logo={LOGO_GOLD} data={invData} />
+      </div>
+      {createPortal(
+        <div className="invoice-print-portal">
+          <InvoicePrint logo={LOGO_GOLD} data={invData} />
+        </div>,
+        document.body
+      )}
+      <style>{`
+        .invoice-preview{margin-top:16px;overflow:auto}
+        .invoice-preview .inv-page{transform:scale(.55);transform-origin:top left}
+        .invoice-preview{height:calc(297mm * .55 + 20px)}
+        .invoice-print-portal{display:none}
+        @media print{
+          body>#root{display:none!important}
+          .invoice-print-portal{display:block}
+          .invoice-print-portal .inv-page{box-shadow:none;width:auto;margin:0}
+        }
+      `}</style>
+    </Modal>
   );
 }
 
