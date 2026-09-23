@@ -444,15 +444,27 @@ const emptyServices = () =>
     ])
   );
 const serviceIds = () => SERVICES.map((s) => s.id);
-const normalizeNeededServices = (needed) => {
-  const valid = new Set(serviceIds());
+const servicesForGroup = (g) => [
+  ...SERVICES,
+  ...((g?.customServices || []).map((s) => ({
+    ...s,
+    short: s.label,
+    icon: ClipboardList,
+    lead: Number(s.lead) || 14,
+  }))),
+];
+const normalizeNeededServices = (needed, customServices = []) => {
+  const valid = new Set([
+    ...serviceIds(),
+    ...(customServices || []).map((s) => s.id),
+  ]);
   if (!Array.isArray(needed)) return serviceIds();
   const ids = needed.filter((id) => valid.has(id));
   if (ids.includes("vaksin") && !ids.includes("vaksin_polio"))
     ids.push("vaksin_polio");
   return Array.from(new Set(ids));
 };
-const neededIds = (g) => normalizeNeededServices(g?.needed);
+const neededIds = (g) => normalizeNeededServices(g?.needed, g?.customServices);
 const groupProgress = (g) => {
   const ids = neededIds(g);
   const items = ids
@@ -469,7 +481,7 @@ const serviceAlert = (g, sid) => {
   if (!neededIds(g).includes(sid)) return null;
   const sv = g.services && g.services[sid];
   if (!sv || sv.status === "Selesai" || sv.status === "N/A") return null;
-  const def = SERVICES.find((s) => s.id === sid);
+  const def = servicesForGroup(g).find((s) => s.id === sid);
   const dueN = daysUntil(sv.due);
   if (dueN !== null && dueN < 0) return "overdue";
   const depN = daysUntil(g.departDate);
@@ -536,7 +548,8 @@ function normalize(d) {
   d.payables = d.payables || [];
   d.groups = (d.groups || []).map((g) => ({
     ...g,
-    needed: normalizeNeededServices(g.needed),
+    customServices: Array.isArray(g.customServices) ? g.customServices : [],
+    needed: normalizeNeededServices(g.needed, g.customServices),
     services: { ...emptyServices(), ...(g.services || {}) },
   }));
   d.jamaah = d.jamaah || [];
@@ -1754,6 +1767,7 @@ function FinanceApp({ session }) {
   const [sync, setSync] = useState("saved");
   const [undoStack, setUndoStack] = useState([]);
   const [undoOpen, setUndoOpen] = useState(false);
+  const [undoConfirm, setUndoConfirm] = useState(null);
   const cloudReadyRef = useRef(false);
   const skipSave = useRef(true);
   const savingRef = useRef(false);
@@ -2062,8 +2076,11 @@ function FinanceApp({ session }) {
   const undoTo = (id) => {
     const entry = undoStack.find((x) => x.id === id) || undoStack[0];
     if (!entry || !data) return;
-    if (!confirmAct("Undo: kembalikan data ke sebelum '" + entry.label + "'?"))
-      return;
+    setUndoConfirm(entry);
+  };
+  const confirmUndo = () => {
+    const entry = undoConfirm;
+    if (!entry || !data) return;
     const current = structuredClone(data);
     setData(structuredClone(entry.data));
     setUndoStack((stack) =>
@@ -2078,6 +2095,7 @@ function FinanceApp({ session }) {
       ].slice(0, 20)
     );
     setUndoOpen(false);
+    setUndoConfirm(null);
     notify("Undo berhasil.");
   };
 
@@ -2432,6 +2450,14 @@ function FinanceApp({ session }) {
         };
       }
     }, "Ubah pelayanan");
+  const setGroupServices = (groupId, needed, customServices) =>
+    patch((d) => {
+      const g = d.groups.find((x) => x.id === groupId);
+      if (!g) return;
+      g.needed = normalizeNeededServices(needed, customServices || g.customServices);
+      if (customServices) g.customServices = customServices;
+      g.services = { ...emptyServices(), ...(g.services || {}) };
+    }, "Tambah layanan rombongan");
   const saveJamaah = (j) =>
     patch(
       (d) => {
@@ -2718,6 +2744,7 @@ function FinanceApp({ session }) {
                 selGroup,
                 setSelGroup,
                 setService,
+                setBulkJamaahModal,
                 setJamaahModal,
                 delJamaah,
                 setTxModal,
@@ -2884,6 +2911,16 @@ function FinanceApp({ session }) {
             notify("Berhasil menambah " + list.length + " jamaah.");
           }}
         />
+      )}
+      {undoConfirm && (
+        <Modal title="Konfirmasi Undo" sub="Perubahan ini akan mengganti data saat ini." onClose={() => setUndoConfirm(null)}>
+          <p>Yakin ingin membatalkan <b>{undoConfirm.label}</b>?</p>
+          <div className="modal-foot">
+            <div className="grow" />
+            <button className="btn btn-ghost" onClick={() => setUndoConfirm(null)}>Batal</button>
+            <button className="btn btn-primary" onClick={confirmUndo}><RotateCcw size={14} /> Ya, Undo</button>
+          </div>
+        </Modal>
       )}
       {invoiceModal && (
         <InvoiceModal
@@ -5864,6 +5901,8 @@ function Keberangkatan({
   selGroup,
   setSelGroup,
   setService,
+  setGroupServices,
+  setBulkJamaahModal,
   setJamaahModal,
   delJamaah,
   setTxModal,
@@ -5893,6 +5932,7 @@ function Keberangkatan({
           setGroupModal,
           setSelGroup,
           setService,
+          setGroupServices,
           setJamaahModal,
           delJamaah,
           setTxModal,
@@ -5938,6 +5978,9 @@ function Keberangkatan({
           yang perlu dicek.
         </p>
         <div className="grow" />
+        <button className="btn btn-out" onClick={() => setBulkJamaahModal({})}>
+          <Plus size={16} /> Import Massal Jamaah
+        </button>
         <button className="btn btn-primary" onClick={() => setGroupModal({})}>
           <Plus size={16} /> Tambah Rombongan
         </button>
@@ -6080,14 +6123,14 @@ function GroupCard({ g, data, clash, onOpen, onFinance, onEdit, onDelete }) {
       </div>
       <div className="svc-dots">
         {neededIds(g).map((id) => {
-          const s = SERVICES.find((x) => x.id === id);
+          const s = servicesForGroup(g).find((x) => x.id === id);
           if (!s) return null;
           const sv = (g.services && g.services[s.id]) || { status: "Belum" };
           const al = serviceAlert(g, s.id);
           return (
             <span
               key={s.id}
-              title={s.label + ": " + sv.status}
+              title={al ? serviceAlertText(s, sv, al, g) : s.label + ": " + sv.status}
               className={
                 "svc-dot " + SVC_CLS[sv.status] + (al ? " dot-alert" : "")
               }
@@ -6124,11 +6167,15 @@ function GroupDetail({
   setGroupModal,
   setSelGroup,
   setService,
+  setGroupServices,
   setJamaahModal,
   delJamaah,
   setTxModal,
   setInvoiceModal,
 }) {
+  const [addingService, setAddingService] = useState(false);
+  const [serviceToAdd, setServiceToAdd] = useState("");
+  const [customServiceName, setCustomServiceName] = useState("");
   const jam = data.jamaah.filter((j) => j.groupId === g.id);
   const tx = groupTx(g, data);
   const prog = groupProgress(g);
@@ -6295,6 +6342,9 @@ function GroupDetail({
       <div className="card">
         <div className="card-head">
           <h3>Checklist Layanan</h3>
+          <button className="btn btn-out btn-xs" onClick={() => setAddingService((v) => !v)}>
+            <Plus size={14} /> Tambah Layanan
+          </button>
           <span className="muted sm mono">
             {prog.done}/{prog.total} selesai · {prog.pct}%
           </span>
@@ -6302,17 +6352,32 @@ function GroupDetail({
         <div className="prog-track" style={{ marginBottom: 14 }}>
           <div className="prog-fill" style={{ width: prog.pct + "%" }} />
         </div>
+        {addingService && (
+          <div className="add-service-panel">
+            <Field label="Pilih layanan bawaan yang belum ada">
+              <select className="input" value={serviceToAdd} onChange={(e) => setServiceToAdd(e.target.value)}>
+                <option value="">Pilih layanan…</option>
+                {SERVICES.filter((s) => !neededIds(g).includes(s.id)).map((s) => <option key={s.id} value={s.id}>{s.label}</option>)}
+              </select>
+            </Field>
+            <button className="btn btn-primary btn-xs" disabled={!serviceToAdd} onClick={() => { setGroupServices(g.id, [...neededIds(g), serviceToAdd]); setServiceToAdd(""); setAddingService(false); }}>Tambahkan</button>
+            <span className="muted xs">atau buat layanan baru:</span>
+            <input className="input" value={customServiceName} onChange={(e) => setCustomServiceName(e.target.value)} placeholder="Nama layanan baru" />
+            <button className="btn btn-out btn-xs" disabled={!customServiceName.trim()} onClick={() => { const label = customServiceName.trim(); const service = { id: "custom-" + uid("svc"), label, lead: 14 }; setGroupServices(g.id, [...neededIds(g), service.id], [...(g.customServices || []), service]); setCustomServiceName(""); setAddingService(false); }}>Buat & tambahkan</button>
+          </div>
+        )}
         <div className="svc-list">
           {neededIds(g).length === 0 && (
             <Empty text="Belum ada layanan dipilih. Klik 'Edit Info Rombongan' untuk memilih layanan yang dibutuhkan." />
           )}
           {neededIds(g).map((id) => {
-            const s = SERVICES.find((x) => x.id === id);
+            const s = servicesForGroup(g).find((x) => x.id === id);
             if (!s) return null;
             return (
               <ServiceRow
                 key={s.id}
                 svcDef={s}
+                group={g}
                 sv={
                   (g.services && g.services[s.id]) || {
                     status: "Belum",
@@ -6430,7 +6495,7 @@ function GroupDetail({
   );
 }
 
-function ServiceRow({ svcDef, sv, alert, onChange }) {
+function ServiceRow({ svcDef, sv, alert, onChange, group }) {
   const I = svcDef.icon;
   const [pic, setPic] = useState(sv.pic || "");
   const [note, setNote] = useState(sv.note || "");
@@ -6447,10 +6512,12 @@ function ServiceRow({ svcDef, sv, alert, onChange }) {
           <I size={15} />
         </span>
         {svcDef.label}
-        {alert === "overdue" && (
-          <span className="svc-flag over">Lewat tempo</span>
+        {alert && (
+          <span className="service-alert-tip" tabIndex={0} aria-label={serviceAlertText(svcDef, sv, alert, group)}>
+            <AlertCircle size={15} />
+            <span className="service-alert-pop">{serviceAlertText(svcDef, sv, alert, group)}</span>
+          </span>
         )}
-        {alert === "soon" && <span className="svc-flag soon">Segera</span>}
       </div>
       <select
         className="input"
@@ -6499,6 +6566,18 @@ function ServiceRow({ svcDef, sv, alert, onChange }) {
   );
 }
 
+const serviceAlertText = (svcDef, sv, alert, group) => {
+  const remaining = sv?.due ? daysUntil(sv.due) : null;
+  const time = remaining === null
+    ? "deadline belum diatur"
+    : remaining < 0
+    ? `terlambat ${Math.abs(remaining)} hari dari deadline ${fmtDate(sv.due)}`
+    : remaining === 0
+    ? `deadline hari ini (${fmtDate(sv.due)})`
+    : `sisa ${remaining} hari, deadline ${fmtDate(sv.due)}`;
+  return `${svcDef.label}: ${alert === "overdue" ? "perlu segera ditangani; " : "segera ditangani sebelum keberangkatan; "}${time}. Keberangkatan ${countdownLabel(group?.departDate)}. Status: ${sv?.status || "Belum"}${sv?.pic ? `. PIC: ${sv.pic}` : ""}${sv?.note ? `. Catatan: ${sv.note}` : ""}`;
+};
+
 /* ============================================================
    VIEW: PELAYANAN (worklist + matriks)
    ============================================================ */
@@ -6506,7 +6585,7 @@ function Pelayanan({ data, setSelGroup, setView, setService }) {
   const items = [];
   data.groups.forEach((g) =>
     neededIds(g).forEach((id) => {
-      const s = SERVICES.find((x) => x.id === id);
+      const s = servicesForGroup(g).find((x) => x.id === id);
       if (!s) return;
       const sv = g.services && g.services[s.id];
       if (!sv || sv.status === "Selesai" || sv.status === "N/A") return;
@@ -6642,10 +6721,8 @@ function Pelayanan({ data, setSelGroup, setView, setService }) {
               <thead>
                 <tr>
                   <th>Rombongan</th>
-                  {SERVICES.map((s) => (
-                    <th key={s.id} className="mtx-h" title={s.label}>
-                      {s.short}
-                    </th>
+                  {Array.from(new Map(groupsUp.flatMap((group) => servicesForGroup(group)).map((s) => [s.id, s])).values()).map((s) => (
+                    <th key={s.id} className="mtx-h" title={s.label}>{s.short}</th>
                   ))}
                 </tr>
               </thead>
@@ -6660,7 +6737,7 @@ function Pelayanan({ data, setSelGroup, setView, setService }) {
                         {countdownLabel(g.departDate)}
                       </div>
                     </td>
-                    {SERVICES.map((s) => {
+                    {Array.from(new Map(groupsUp.flatMap((group) => servicesForGroup(group)).map((s) => [s.id, s])).values()).map((s) => {
                       if (!neededIds(g).includes(s.id))
                         return (
                           <td key={s.id} className="mtx-c">
@@ -6674,7 +6751,7 @@ function Pelayanan({ data, setSelGroup, setView, setService }) {
                       return (
                         <td key={s.id} className="mtx-c">
                           <span
-                            title={s.label + ": " + sv.status}
+                            title={al ? serviceAlertText(s, sv, al, g) : s.label + ": " + sv.status}
                             className={
                               "svc-dot " +
                               SVC_CLS[sv.status] +
@@ -7106,7 +7183,8 @@ function GroupForm({
     driveLink: "",
     notes: "",
     ...init,
-    needed: normalizeNeededServices(init.needed),
+    customServices: Array.isArray(init.customServices) ? init.customServices : [],
+    needed: normalizeNeededServices(init.needed, init.customServices),
     departDate: init.departDate ? fmtDateInput(init.departDate) : "",
     returnDate: init.returnDate ? fmtDateInput(init.returnDate) : "",
     txDate: fmtDateInput(new Date()),
@@ -7202,7 +7280,7 @@ function GroupForm({
       <Field label="Layanan yang Dibutuhkan">
         <div className="svc-pick-head">
           <span className="muted xs">
-            {f.needed.length} dari {SERVICES.length} layanan dipilih
+          {f.needed.length} layanan dipilih
           </span>
           <div className="grow" />
           <button
@@ -7249,6 +7327,11 @@ function GroupForm({
             );
           })}
         </div>
+        {f.customServices.length > 0 && <div className="custom-service-chips">{f.customServices.map((s) => {
+          const on = f.needed.includes(s.id);
+          return <button type="button" key={s.id} className={"svc-chip" + (on ? " on" : "")} onClick={() => set("needed", on ? f.needed.filter((x) => x !== s.id) : [...f.needed, s.id])}>{s.label}{on && <Check size={12} />}</button>;
+        })}</div>}
+        <p className="muted xs">Layanan tambahan bisa dibuat dari checklist detail rombongan.</p>
       </Field>
       <Field label="Link Berkas (Google Drive, opsional)">
         <input
@@ -7527,6 +7610,7 @@ function GroupForm({
               packageType: f.packageType,
               pax: Number(f.pax) || 0,
               needed: f.needed,
+              customServices: f.customServices,
               driveLink: f.driveLink,
               notes: f.notes,
               departDate: f.departDate
@@ -8076,6 +8160,7 @@ function JamaahForm({ init, data, onClose, onSave }) {
 /* ── IMPORT MASSAL JAMAAH (banyak paspor sekaligus) ── */
 function BulkJamaahImport({ init, data, onClose, onImport }) {
   const [groupId, setGroupId] = useState(init?.groupId || "");
+  const [groupLocked, setGroupLocked] = useState(!!init?.groupId);
   const [paymentStatus, setPaymentStatus] = useState("Belum");
   const [rows, setRows] = useState([]);
   const [busy, setBusy] = useState(false);
@@ -8124,6 +8209,8 @@ function BulkJamaahImport({ init, data, onClose, onImport }) {
   const valid = rows.filter((r) => String(r.doc?.name || "").trim());
 
   const doImport = () => {
+    if (!groupId && data.groups.length > 0)
+      return notify("Pilih rombongan tujuan terlebih dahulu.");
     if (!valid.length)
       return notify("Belum ada jamaah dengan nama untuk disimpan.");
     const list = valid.map((r) => {
@@ -8164,6 +8251,7 @@ function BulkJamaahImport({ init, data, onClose, onImport }) {
           <select
             className="input"
             value={groupId}
+            disabled={groupLocked}
             onChange={(e) => setGroupId(e.target.value)}
           >
             <option value="">— belum ditentukan —</option>
@@ -8173,6 +8261,7 @@ function BulkJamaahImport({ init, data, onClose, onImport }) {
               </option>
             ))}
           </select>
+          {groupLocked && <button className="link xs" type="button" onClick={() => setGroupLocked(false)}>Ubah rombongan tujuan</button>}
         </Field>
         <Field label="Status Pembayaran (semua)">
           <select
@@ -11070,6 +11159,12 @@ tr.clickable:hover{background:#faf8f2}
 .svc-ic.svc-selesai{background:var(--green)}
 .svc-ic.svc-na{background:#cfc7b3}
 .svc-row .input{padding:7px 9px;font-size:12.5px}
+.service-alert-tip{position:relative;display:inline-flex;align-items:center;color:var(--red);cursor:help;outline:none}
+.service-alert-pop{display:none;position:absolute;z-index:30;left:50%;bottom:calc(100% + 9px);transform:translateX(-50%);width:260px;white-space:normal;border:1px solid rgba(192,73,47,.28);border-radius:9px;background:#fff;padding:10px 12px;color:var(--ink);font-size:12px;font-weight:500;line-height:1.5;box-shadow:0 10px 28px rgba(20,30,25,.16)}
+.service-alert-tip:hover .service-alert-pop,.service-alert-tip:focus .service-alert-pop{display:block}
+.add-service-panel{display:flex;align-items:end;gap:9px;flex-wrap:wrap;padding:12px;margin:10px 0;border:1px dashed var(--emerald);border-radius:10px;background:rgba(17,112,79,.04)}
+.add-service-panel .field{min-width:220px;flex:1}
+.custom-service-chips{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
 .svc-flag{font-size:10px;font-weight:700;padding:2px 6px;border-radius:5px;margin-left:6px;white-space:nowrap}
 .svc-flag.over{background:rgba(192,73,47,.14);color:var(--red)}
 .svc-flag.soon{background:rgba(212,160,76,.2);color:#a87f29}
@@ -11154,3 +11249,4 @@ tbody tr{transition:background .14s ease}
 
 @media print{.sidebar,.topbar,.no-print,.toolbar,.sidebar-overlay,.mobile-toggle{display:none!important}.main{display:block}.content{padding:0}.card{box-shadow:none;border:1px solid #ddd}.content>.stack>*{animation:none}}
 `;
+
